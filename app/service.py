@@ -475,6 +475,20 @@ class TrendService:
                 )
                 db.execute("UPDATE trends SET status = 'generated' WHERE id = ?", (trend["id"],))
             return True
+        except asyncio.CancelledError:
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE generations SET status='failed', duration_ms=?, error=?, finished_at=? WHERE id=?""",
+                    (round((time.perf_counter() - started) * 1000), "任务已取消", utc_now(), generation_id),
+                )
+                generated = db.execute(
+                    "SELECT 1 FROM generations WHERE trend_id=? AND status='success'", (trend["id"],)
+                ).fetchone()
+                db.execute(
+                    "UPDATE trends SET status = ? WHERE id = ?",
+                    ("generated" if generated else trend["status"], trend["id"]),
+                )
+            raise
         except Exception as exc:
             with self._connect() as db:
                 db.execute(
@@ -535,9 +549,17 @@ class TrendService:
             return raw, base64.b64decode(encoded), mime_type
         if not image_url.startswith(("http://", "https://")):
             image_url = urljoin(f"{self.flow_base_url}/", image_url.lstrip("/"))
+        image_origin = urlparse(image_url)
+        flow_origin = urlparse(self.flow_base_url)
+        download_headers = (
+            {"Authorization": f"Bearer {self.flow_api_key}"}
+            if (image_origin.scheme, image_origin.hostname, image_origin.port)
+            == (flow_origin.scheme, flow_origin.hostname, flow_origin.port)
+            else {}
+        )
         image_response = await self.http.get(
             image_url,
-            headers={"Authorization": f"Bearer {self.flow_api_key}"},
+            headers=download_headers,
             timeout=120,
         )
         image_response.raise_for_status()
