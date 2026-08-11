@@ -30,24 +30,24 @@ git pull --ff-only origin main
 
 ## 项目目标与边界
 
-这是独立的海外社媒热点创作服务：
+这是独立的海外社媒商品热点创作服务：
 
-1. Gemini2API 发现最近时间窗口内的海外社媒热点。
-2. Gemini2API 第二次核验候选热点、证据 URL、发布时间和视觉价值。
-3. 本服务执行来源、时效和安全门禁并保存审核状态。
-4. 人工选择热点后，Flow2API 根据热点生成原创编辑视觉。
+1. Gemini2API 发现最近时间窗口内适合选品、商品策划和营销创意的海外社媒热点。
+2. Gemini2API 第二次完善候选的商品角度和商业视觉方向。
+3. 本服务保留可用来源并执行重复、空内容和安全检查；来源与时间不作为生图门禁。
+4. 手动主流程获取热点后，Flow2API 为全部可用候选直接生成原创商品视觉。
 5. SQLite 保存轮次、热点、证据、提示词、图片、耗时和错误。
 
 项目不得导入、复制或修改 Gemini2API/Flow2API 源码，也不得启动、停止或重建它们的容器。两个上游只通过 OpenAI 兼容 HTTP API 连接。
 
 ## 工作流与状态
 
-- `ready`：至少一个有效 HTTP(S) 证据位于配置的时间窗口内，可以人工生图；开启自动生图时也可自动生成。
-- `needs_review`：存在证据 URL，但发布时间缺失或无法解析，只能人工勾选生图。
-- `rejected`：无有效来源、证据全部过期或 Gemini 核验拒绝，禁止生图。
+- `ready`：商品角度可用且未被判定为重复、空内容或不安全；无论是否有证据都可以直接生图。
+- `needs_review`：仅为兼容旧轮次保留，新发现流程不再因来源时间缺失进入此状态。
+- `rejected`：重复、空内容或明确不安全的候选，禁止生图。
 - 任一时刻只允许一个发现或生成任务执行，冲突返回 HTTP `409`。
-- 定时任务和自动生图默认关闭，上线前必须先人工验证数轮。
-- Prompt-first discovery 不能证明 Gemini 一定进行了实时联网搜索；证据 URL 和发布时间门禁是必要保护，不能删除。
+- 定时任务及其自动生图默认关闭；手动完整流程会直接生图，上线前必须先人工验证数轮。
+- Prompt-first discovery 不能证明 Gemini 一定进行了实时联网搜索；不得伪造来源，但来源 URL 和发布时间仅作参考，不阻止商品创意生图。
 
 ## 当前默认策略
 
@@ -57,14 +57,15 @@ git pull --ff-only origin main
 - 地区：美国、英国、欧洲、全球英语区
 - 平台：X、TikTok、Instagram、YouTube、Reddit
 - 候选数：10
-- 最终热点数：5
+- 最终热点数：与候选数一致，不再另设保留上限
 - 每个热点图片数：1
 - Gemini 发现模型：`gemini-pro-thinking`
 - Gemini 核验模型：`gemini-flash`
 - Flow 默认模型：`gemini-3.1-flash-image-landscape`
 - 生图并发：2，接口允许范围 1–5
 - 定时调度：关闭
-- 自动生图：关闭
+- 手动完整流程：获取后直接生图
+- 定时任务自动生图：关闭
 - 飞书通知：关闭
 
 可选模型以 `app/service.py` 中的 `GEMINI_MODELS` 和 `FLOW_MODELS` 为唯一事实来源。Flow 模型列表不包含 2K/4K 别名。
@@ -72,9 +73,9 @@ git pull --ff-only origin main
 ## 主要文件
 
 - `app/main.py`：FastAPI 入口、Bearer 鉴权和管理 API。
-- `app/service.py`：配置、SQLite、Gemini 发现与核验、Flow 生图、调度、门禁和飞书通知。
+- `app/service.py`：配置、SQLite、Gemini 商品热点发现与复核、Flow 生图、调度、安全筛选和飞书通知。
 - `static/index.html`：独立管理页面。
-- `tests/test_service.py`：核心解析、门禁和数据行为测试。
+- `tests/test_service.py`：核心解析、商品候选筛选和数据行为测试。
 - `docker-compose.yml` / `Dockerfile`：独立容器部署。
 - `data/`：SQLite 和生成图片挂载目录；运行数据不进入 Git。
 - `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：项目总览与必须持续更新的变更日志。
@@ -110,7 +111,7 @@ Authorization: Bearer <ADMIN_KEY>
 - `PUT /api/config`
 - `POST /api/connections/test`
 - `POST /api/runs/discover`
-- `POST /api/runs/full`
+- `POST /api/runs/full`：获取商品热点并为全部可用候选直接生图
 - `GET /api/runs/{run_id}`
 - `POST /api/runs/{run_id}/generate`
 - `POST /api/runs/{run_id}/cancel`
@@ -175,8 +176,8 @@ curl http://localhost:5920/health
 
 1. 先读取本文件及 `AGENTS.md`，再检查实际代码和 Git 状态。
 2. 不把 Gemini2API/Flow2API 的账号、Cookie、浏览器 Profile 或代理逻辑耦合进本项目。
-3. 不把提示词返回的“已联网”当作证据；门禁必须基于结构化来源和时间。
-4. 不默认开启定时任务或自动生图。
+3. 不把提示词返回的“已联网”当作证据，也不伪造来源；来源和时间仅作为可选参考，不作为商品生图门禁。
+4. 不默认开启定时任务或定时自动生图；手动完整流程按商品模式直接生图。
 5. 每次功能修改同步更新测试和 `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`。
 6. 默认推送 `752801828/social-trend-creative` 的 `main` 分支。
 7. 每次推送后返回服务机更新命令。
@@ -184,10 +185,11 @@ curl http://localhost:5920/health
 ## 当前完成状态
 
 - 独立 FastAPI 服务、SQLite、管理页面和 Docker 部署已完成。
-- Gemini 两阶段发现与核验、来源时间门禁已完成。
+- Gemini 两阶段商品热点发现与复核、可选来源保存和安全筛选已完成。
 - 人工选题、Flow 多模型随机生图、并发、图片落盘和失败记录已完成。
 - 每日调度、自动生图开关、连接检查和可选飞书通知已完成。
 - 管理页面的统计、轮次详情、来源链接、图片预览、终止和删除已完成。
-- 初始测试共 8 项，交接时全部通过。
+- 商品导向发现、无证据可生图、取消最终保留上限以及手动获取后直接生图已完成。
+- 当前测试共 11 项，覆盖商品提示词、无证据候选、取消最终上限、手动直接生图、状态恢复和鉴权隔离。
 
 新对话应以仓库实际 `main` 分支为准，不依赖原对话上下文。

@@ -45,7 +45,6 @@ class ConfigUpdate(BaseModel):
     regions: list[str] | None = None
     platforms: list[str] | None = None
     candidate_count: int | None = Field(default=None, ge=1, le=30)
-    final_count: int | None = Field(default=None, ge=1, le=30)
     images_per_trend: int | None = Field(default=None, ge=1, le=5)
     gemini_discovery_model: str | None = None
     gemini_verification_model: str | None = None
@@ -106,7 +105,7 @@ async def full_run():
     run_id = service.launch_discovery(trigger_type="manual", auto_generate=True)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted", "auto_generate": service.get_config()["auto_generate"]}
+    return {"run_id": run_id, "status": "accepted", "auto_generate": True}
 
 
 @app.get("/api/runs/{run_id}", dependencies=[Depends(require_admin)])
@@ -145,4 +144,3 @@ async def delete_run(run_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="轮次不存在")
     return {"deleted": True}
-

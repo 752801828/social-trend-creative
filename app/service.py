@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -58,7 +58,6 @@ DEFAULT_CONFIG = {
     "regions": ["United States", "United Kingdom", "Europe", "Global English"],
     "platforms": ["X", "TikTok", "Instagram", "YouTube", "Reddit"],
     "candidate_count": 10,
-    "final_count": 5,
     "images_per_trend": 1,
     "gemini_discovery_model": "gemini-pro-thinking",
     "gemini_verification_model": "gemini-flash",
@@ -71,19 +70,6 @@ DEFAULT_CONFIG = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def parse_time(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    except ValueError:
-        return None
 
 
 def json_text(value: Any) -> str:
@@ -240,7 +226,9 @@ class TrendService:
     def get_config(self) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT value FROM settings WHERE id = 1").fetchone()
-        return {**copy.deepcopy(DEFAULT_CONFIG), **json.loads(row["value"])}
+        config = {**copy.deepcopy(DEFAULT_CONFIG), **json.loads(row["value"])}
+        config.pop("final_count", None)
+        return config
 
     def save_config(self, values: dict[str, Any]) -> dict[str, Any]:
         config = {**self.get_config(), **values}
@@ -249,7 +237,6 @@ class TrendService:
         ZoneInfo(str(config["timezone"]))
         config["lookback_hours"] = min(168, max(1, int(config["lookback_hours"])))
         config["candidate_count"] = min(30, max(1, int(config["candidate_count"])))
-        config["final_count"] = min(config["candidate_count"], max(1, int(config["final_count"])))
         config["images_per_trend"] = min(5, max(1, int(config["images_per_trend"])))
         config["generation_concurrency"] = min(5, max(1, int(config["generation_concurrency"])))
         config["regions"] = [str(item).strip() for item in config.get("regions", []) if str(item).strip()][:20]
@@ -361,8 +348,7 @@ class TrendService:
                 verification = extract_json_object(verification_text)
                 trends = self._verify_candidates(config, candidates, verification)
                 self._replace_trends(run_id, trends)
-                usable = [item for item in trends if item["status"] in {"ready", "needs_review"}]
-                ready = [item for item in usable if item["status"] == "ready"]
+                usable = [item for item in trends if item["status"] == "ready"]
                 self._update_run(
                     run_id,
                     raw_verification=verification_text,
@@ -371,8 +357,8 @@ class TrendService:
                     stage="review" if usable else "finished",
                     error="" if usable else "没有通过核验的热点",
                 )
-                if auto_generate and config.get("auto_generate") and ready:
-                    await self._generate_selected(run_id, [item["id"] for item in ready])
+                if auto_generate and usable:
+                    await self._generate_selected(run_id, [item["id"] for item in usable])
                     self._finish_duration(run_id, started)
                 else:
                     self._finish_duration(run_id, started)
@@ -571,7 +557,7 @@ class TrendService:
 
     def _discovery_prompt(self, config: dict[str, Any]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are a real-time overseas social-media trend researcher.
+        return f"""You are a real-time overseas social-media product-trend and social-commerce researcher.
 
 Current time: {now}
 Lookback window: the previous {config['lookback_hours']} hours
@@ -579,14 +565,14 @@ Target regions: {', '.join(config['regions'])}
 Target platforms: {', '.join(config['platforms'])}
 Return at most {config['candidate_count']} candidate trends.
 
-You must use any internet-search capability available in the current Gemini session. Find real, current overseas social-media topics that appeared or accelerated inside the lookback window.
+You must use any internet-search capability available in the current Gemini session. Find current products, product categories, consumer needs, aesthetics, use cases, gifting moments, and social topics that can become product-selection or product-marketing opportunities.
 
 Rules:
-1. Every trend must include at least one HTTP(S) evidence URL. Prefer an original social post and two independent sources.
-2. Never invent URLs, publication times, engagement metrics, quotes, or claims.
+1. Every result must have a concrete product angle suitable for e-commerce selection, merchandising, or campaign creative.
+2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful product opportunity only because evidence is unavailable.
 3. Use null when a value cannot be verified.
-4. Reject stale topics, pure advertisements, gambling, adult content, graphic violence, and obvious misinformation.
-5. Prefer cross-platform momentum and topics suitable for original editorial visual creation.
+4. Reject gambling, adult content, graphic violence, obvious misinformation, and unsafe product ideas.
+5. Prefer visually demonstrable products, clear consumer demand, and ideas that can become an original commercial image.
 6. Return strict JSON only. Do not use Markdown fences or prose outside JSON.
 
 Schema:
@@ -601,14 +587,14 @@ Schema:
       "why_trending": "Why it is trending",
       "platforms": ["X"],
       "region": "Primary region",
-      "category": "technology",
+      "category": "product category",
       "first_seen_at": "ISO-8601 or null",
       "engagement_signal": "Verified signal or null",
       "evidence": [
         {{"source_type":"platform","platform":"X","title":"Source title","url":"https://...","published_at":"ISO-8601 or null"}}
       ],
       "confidence": 0.85,
-      "visual_brief_en": "Original editorial visual direction in English",
+      "visual_brief_en": "Product-focused commercial image direction in English",
       "risk_flags": []
     }}
   ],
@@ -617,13 +603,12 @@ Schema:
 
     def _verification_prompt(self, config: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are the evidence reviewer for overseas social-media trends.
+        return f"""You are the product-opportunity editor for overseas social-media trends.
 
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
-Maximum accepted trends: {config['final_count']}
 
-Review the candidates below. Preserve candidate_id exactly. Reject missing, irrelevant, stale, fabricated, unsafe, or duplicate evidence. Do not add new topics. Return strict JSON only.
+Review the candidates below and polish each product angle and commercial visual direction. Preserve candidate_id exactly. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, or unsafe product ideas. Do not add new topics. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -634,7 +619,7 @@ Schema:
     {{"candidate_id":"id","decision":"accept","reason":"short reason","confidence":0.8,"visual_brief_en":"polished original visual direction"}}
   ],
   "removed_trends": [
-    {{"candidate_id":"id","decision":"reject","reason":"reason"}}
+    {{"candidate_id":"id","decision":"reject","reason_code":"duplicate|empty|unsafe","reason":"reason"}}
   ]
 }}"""
 
@@ -689,17 +674,14 @@ Schema:
         removed = {
             str(item.get("candidate_id")): str(item.get("reason") or "Gemini核验拒绝")
             for item in removed_items
-            if isinstance(item, dict)
+            if isinstance(item, dict) and str(item.get("reason_code") or "").lower() in {"duplicate", "empty", "unsafe"}
         }
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=config["lookback_hours"])
         output = []
-        accepted_count = 0
         for candidate in candidates:
             item = copy.deepcopy(candidate)
             candidate_id = item.pop("candidate_id")
             decision = accepted.get(candidate_id)
             evidence = []
-            evidence_times = []
             for source in item["evidence"]:
                 if not isinstance(source, dict):
                     continue
@@ -715,29 +697,16 @@ Schema:
                     "published_at": source.get("published_at"),
                 }
                 evidence.append(clean)
-                parsed_time = parse_time(clean["published_at"])
-                if parsed_time:
-                    evidence_times.append(parsed_time)
             item["evidence"] = evidence
-            if not decision:
+            if candidate_id in removed:
                 item["status"] = "rejected"
-                item["verification_note"] = removed.get(candidate_id, "Gemini核验未接受")
-            elif not evidence:
-                item["status"] = "rejected"
-                item["verification_note"] = "缺少有效HTTP(S)来源"
-            elif evidence_times and not any(value >= cutoff for value in evidence_times):
-                item["status"] = "rejected"
-                item["verification_note"] = "来源全部超出时间窗口"
-            elif accepted_count >= config["final_count"]:
-                item["status"] = "rejected"
-                item["verification_note"] = "超过本轮保留数量"
+                item["verification_note"] = removed[candidate_id]
             else:
-                item["status"] = "ready" if any(value >= cutoff for value in evidence_times) else "needs_review"
-                item["verification_note"] = str(decision.get("reason") or "核验通过")[:500]
-                item["confidence"] = max(item["confidence"], confidence(decision.get("confidence")))
-                if str(decision.get("visual_brief_en") or "").strip():
+                item["status"] = "ready"
+                item["verification_note"] = str((decision or {}).get("reason") or "商品创意可用")[:500]
+                item["confidence"] = max(item["confidence"], confidence((decision or {}).get("confidence")))
+                if str((decision or {}).get("visual_brief_en") or "").strip():
                     item["visual_brief_en"] = str(decision["visual_brief_en"])[:3000]
-                accepted_count += 1
             item["id"] = secrets.token_hex(12)
             output.append(item)
         return output
@@ -763,7 +732,7 @@ Schema:
 
     @staticmethod
     def _flow_prompt(trend: dict[str, Any]) -> str:
-        return f"""Create an original editorial-style social media trend illustration.
+        return f"""Create an original product-focused commercial image inspired by a current social-media trend.
 
 Trending topic: {trend['topic_en']}
 Verified context: {trend['summary_zh']}
@@ -771,11 +740,11 @@ Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
 Requirements:
-- Landscape composition with a strong central subject and clear visual hierarchy.
-- Modern international social-media aesthetic, high detail, cinematic lighting, realistic materials.
-- Do not include unreadable text, copy an existing post, photograph, logo, or copyrighted composition.
-- Do not imply that the image is a real documentary photograph.
-- For politics, disasters, violence, or real people, use a clearly editorial or conceptual illustration."""
+- Turn the trend into a tangible, sellable product concept or a product-marketing scene.
+- Make the product or product category the clear central subject with strong visual hierarchy.
+- Use a modern international e-commerce and social-ad aesthetic, high detail, clean lighting, and realistic materials.
+- Do not include unreadable text, logos, trademarks, existing packaging, copied posts, or copyrighted compositions.
+- Do not make unsupported performance, health, or endorsement claims."""
 
     def _update_run(self, run_id: str, **values: Any) -> None:
         if not values:

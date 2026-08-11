@@ -3,7 +3,6 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -34,28 +33,34 @@ class TrendServiceTests(unittest.TestCase):
         self.assertTrue(FLOW_MODELS)
         self.assertFalse(any("2k" in model.lower() or "4k" in model.lower() for model in FLOW_MODELS))
 
-    def test_verification_gates_fresh_missing_time_and_bad_url(self):
-        fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    def test_product_candidates_do_not_require_evidence_or_a_final_limit(self):
         candidates = [
-            self._candidate("candidate-1", "Fresh", "https://x.com/example/status/1", fresh),
-            self._candidate("candidate-2", "Review", "https://reddit.com/r/test/1", None),
-            self._candidate("candidate-3", "Reject", "javascript:alert(1)", fresh),
+            self._candidate(f"candidate-{index}", f"Product {index}", "javascript:missing", None)
+            for index in range(1, 7)
         ]
+        config = {**self.service.get_config(), "final_count": 1}
         verification = {
-            "verified_trends": [
-                {"candidate_id": item["candidate_id"], "decision": "accept", "confidence": 0.9}
-                for item in candidates
-            ]
+            "verified_trends": [],
+            "removed_trends": [{"candidate_id": "candidate-1", "reason": "Exceeds the maximum accepted limit"}],
         }
-        result = self.service._verify_candidates(self.service.get_config(), candidates, verification)
-        self.assertEqual([item["status"] for item in result], ["ready", "needs_review", "rejected"])
+        result = self.service._verify_candidates(config, candidates, verification)
+        self.assertEqual([item["status"] for item in result], ["ready"] * 6)
+        self.assertTrue(all(not item["evidence"] for item in result))
 
-    def test_prompts_require_evidence_and_strict_json(self):
+        verification["removed_trends"] = [
+            {"candidate_id": "candidate-1", "reason_code": "unsafe", "reason": "Unsafe product"}
+        ]
+        result = self.service._verify_candidates(config, candidates, verification)
+        self.assertEqual(result[0]["status"], "rejected")
+
+    def test_prompts_focus_on_products_and_keep_evidence_optional(self):
         prompt = self.service._discovery_prompt(self.service.get_config())
-        self.assertIn("evidence URL", prompt)
+        self.assertIn("product-selection or product-marketing", prompt)
+        self.assertIn("Evidence URLs and publication times are optional", prompt)
         self.assertIn("strict JSON", prompt)
         self.assertIn("TikTok", prompt)
         self.assertIn("Reddit", prompt)
+        self.assertIn("sellable product concept", self.service._flow_prompt(self._candidate("candidate-1", "Product", "", None)))
 
     def test_invalid_model_confidence_does_not_break_discovery(self):
         payload = {"trends": [{"topic_en": "Topic", "confidence": "unknown", "platforms": "X"}]}
@@ -67,6 +72,32 @@ class TrendServiceTests(unittest.TestCase):
         config = self.service.get_config()
         self.assertFalse(config["enabled"])
         self.assertFalse(config["auto_generate"])
+        self.assertNotIn("final_count", config)
+
+    def test_explicit_full_run_generates_all_usable_candidates(self):
+        discovery = {
+            "trends": [
+                {"topic_en": "Product one", "topic_zh": "商品一", "evidence": []},
+                {"topic_en": "Product two", "topic_zh": "商品二", "evidence": []},
+            ]
+        }
+        responses = iter((json.dumps(discovery), json.dumps({"verified_trends": []})))
+        generated = []
+
+        async def exercise():
+            async def fake_gemini(_prompt, _model, *, attempts):
+                return next(responses)
+
+            async def fake_generate(_run_id, trend_ids):
+                generated.extend(trend_ids)
+
+            self.service._call_gemini = fake_gemini
+            self.service._generate_selected = fake_generate
+            run_id = self.service.create_run("manual")
+            await self.service._run_discovery(run_id, auto_generate=True)
+
+        asyncio.run(exercise())
+        self.assertEqual(len(generated), 2)
 
     def test_external_flow_image_download_does_not_receive_api_key(self):
         requests = []
@@ -138,9 +169,9 @@ class StaticPageTests(unittest.TestCase):
         cls.html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
     def test_manual_review_controls_are_present(self):
-        self.assertIn("发现今日热点", self.html)
+        self.assertIn("获取商品热点并生图", self.html)
         self.assertIn("生成所选热点", self.html)
-        self.assertIn("需人工确认", self.html)
+        self.assertIn("热点来源平台", self.html)
 
     def test_credentials_are_not_persisted_in_browser_storage(self):
         self.assertNotIn("localStorage", self.html)

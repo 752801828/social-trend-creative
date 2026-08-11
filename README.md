@@ -1,20 +1,17 @@
 # Social Trend Creative
 
-独立的海外社媒热点创作服务：Gemini发现和核验热点，人工确认后由Flow生成原创编辑视觉。项目不导入或修改 Flow2API、Gemini2API 源码，只通过HTTP API连接。
+独立的海外社媒商品热点创作服务：Gemini发现适合选品、商品策划和营销创意的热点，Flow直接生成原创商品视觉。项目不导入或修改 Flow2API、Gemini2API 源码，只通过HTTP API连接。
 
 ## 当前工作流
 
-1. 每日定时或手动启动热点发现。
-2. Gemini按最近时间窗口查询 X、TikTok、Instagram、YouTube、Reddit 等公开信息。
-3. 第二次Gemini请求核验候选、来源、时效和视觉价值。
-4. 本地门禁检查HTTP(S)来源和证据发布时间：
-   - `ready`：至少一条证据时间位于窗口内；允许自动或人工生图。
-   - `needs_review`：来源URL存在但时间缺失；只允许人工勾选生图。
-   - `rejected`：无有效来源、全部过期或核验拒绝；禁止生图。
-5. Flow按所选热点、模型和数量并发生图。
+1. 每日定时或手动启动商品热点发现。
+2. Gemini按最近时间窗口从所选来源平台寻找产品、品类、消费需求、审美、使用场景和营销机会。
+3. 第二次Gemini请求完善商品角度和商业视觉方向，仅排除重复、空内容或明确不安全的候选。
+4. 证据URL和发布时间作为可选参考保存；缺失、无法解析或过期都不阻止生图，也不再设置“最终最多保留数”。
+5. 管理页主流程会为全部 `ready` 候选直接调用Flow生图；定时任务是否自动生图仍由独立开关控制。
 6. 独立SQLite保存轮次、热点、证据、提示词、图片、耗时和错误。
 
-> Prompt-first discovery 不能证明Gemini一定执行了实时搜索。本服务把来源和发布时间作为生图门禁，并默认关闭自动调度与自动生图。上线前应先人工验证数轮。
+> Prompt-first discovery 不能证明Gemini一定执行了实时搜索。系统不会伪造来源；来源缺失不影响商品创意生图。自动调度默认关闭，上线前应先人工验证数轮。
 
 ## 本地启动
 
@@ -68,7 +65,7 @@ Authorization: Bearer <ADMIN_KEY>
 - `PUT /api/config`：更新每日策略。
 - `POST /api/connections/test`：测试Gemini/Flow连接。
 - `POST /api/runs/discover`：只发现和核验热点。
-- `POST /api/runs/full`：按配置执行完整一轮。
+- `POST /api/runs/full`：发现商品热点，并为全部可用候选直接生图。
 - `GET /api/runs/{id}`：轮次、热点、来源和图片详情。
 - `POST /api/runs/{id}/generate`：为人工选择的热点生图。
 - `POST /api/runs/{id}/cancel`：终止当前轮次。
@@ -79,4 +76,3 @@ Authorization: Bearer <ADMIN_KEY>
 ```cmd
 python -m unittest discover -s tests -v
 ```
-
