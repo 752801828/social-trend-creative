@@ -1,0 +1,21 @@
+services:
+  social-trend-creative:
+    build: .
+    image: social-trend-creative:local
+    container_name: social-trend-creative
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5920:5920"
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5920/health', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
