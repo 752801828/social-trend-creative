@@ -30,11 +30,11 @@
       <div class="auth"><span id="authState">未连接</span><input id="adminKey" type="password" placeholder="输入管理密钥" autocomplete="current-password"><button class="btn" onclick="connect()">连接</button></div>
     </div>
     <header class="masthead">
-      <div><div class="eyebrow">Overseas Visual Intelligence</div><h1>SIGNAL <span>/</span> STUDIO</h1><p>Gemini提取海外社媒热点的视觉符号，Flow将其转成可用于多种印刷载体的原创图案。</p></div>
+      <div><div class="eyebrow">Worldwide Visual Intelligence</div><h1>SIGNAL <span>/</span> STUDIO</h1><p>Gemini提取全球社媒热点的视觉符号，Flow将图案直接印到最匹配的杯子、手机壳、衣服、备胎罩等物品上。</p></div>
       <div class="brief"><b>DAILY EDITION</b><strong id="todayLabel">—</strong><small>手动主流程获取后直接生图；定时任务可单独控制自动生图。</small></div>
     </header>
     <section class="actionbar">
-      <div><button id="discoverBtn" class="btn primary" onclick="fullRun()">获取热点并生成图案</button><button class="btn" onclick="openSettings()">自动化设置</button><button class="btn" onclick="testConnections()">测试连接</button></div>
+      <div><button id="discoverBtn" class="btn primary" onclick="fullRun()">获取热点并生成物品图</button><button class="btn" onclick="openSettings()">自动化设置</button><button class="btn" onclick="testConnections()">测试连接</button></div>
       <div><span id="runState" class="state">等待连接</span><button class="btn link" onclick="loadState()">刷新</button></div>
     </section>
     <section class="stats">
@@ -60,7 +60,7 @@
     <div class="field"><label>执行时间</label><input id="cfgTime" type="time"></div>
     <div class="field"><label>查询窗口（小时）</label><input id="cfgLookback" type="number" min="1" max="168"></div>
     <div class="field"><label>每轮热点数</label><input id="cfgCandidates" type="number" min="1" max="30"></div>
-    <div class="field wide"><label>目标地区（逗号分隔）</label><input id="cfgRegions"></div>
+    <div class="field wide"><label>优先地区（全球搜索，逗号分隔）</label><input id="cfgRegions"></div>
     <div class="field wide"><label>热点来源平台</label><div id="cfgPlatforms" class="checks"></div></div>
     <div class="field"><label>Gemini发现模型</label><select id="cfgDiscoveryModel"></select></div>
     <div class="field"><label>Gemini核验模型</label><select id="cfgVerificationModel"></select></div>
@@ -70,7 +70,7 @@
     <div class="field"><label>定时任务自动生图</label><select id="cfgAuto"><option value="false">关闭</option><option value="true">开启，获取后直接生图</option></select></div>
     <div class="field"><label>飞书通知</label><select id="cfgNotify"><option value="false">关闭</option><option value="true">开启</option></select></div>
   </form><footer class="dialogfoot"><button class="btn" onclick="settingsDialog.close()">取消</button><button class="btn primary" onclick="settingsForm.requestSubmit()">保存设置</button></footer></dialog>
-  <dialog id="imageDialog" class="imageviewer" onclick="if(event.target===this)this.close()"><header><strong id="imageTitle">图案预览</strong><button class="btn" onclick="imageDialog.close()" title="关闭放大图" aria-label="关闭放大图">×</button></header><img id="imagePreview" alt=""></dialog>
+  <dialog id="imageDialog" class="imageviewer" onclick="if(event.target===this)this.close()"><header><strong id="imageTitle">物品效果图预览</strong><button class="btn" onclick="imageDialog.close()" title="关闭放大图" aria-label="关闭放大图">×</button></header><img id="imagePreview" alt=""></dialog>
   <div id="toast" class="toast hidden"></div>
 
   <script>
@@ -85,7 +85,7 @@
     function renderState(){const d=state.dashboard,c=state.connections;$('todayLabel').textContent=new Intl.DateTimeFormat('zh-CN',{month:'long',day:'numeric',weekday:'long'}).format(new Date());$('statRuns').textContent=d.today.runs;$('statVerified').textContent=d.today.verified;$('statGenerated').textContent=d.today.generated;$('statHistory').textContent=d.history.generated;$('statDuration').textContent=duration(d.history.avg_duration_ms);$('runState').textContent=d.running?`任务执行中 · ${d.active_run_id}`:state.config.enabled?`每日 ${state.config.schedule_time} 自动发现`:'自动调度已关闭';$('discoverBtn').disabled=d.running;$('platforms').innerHTML=d.platforms.length?d.platforms.map(item=>`<span class="platform">${esc(item.name)}<b>${item.count}</b></span>`).join(''):'<span class="platform">暂无数据</span>';$('connections').innerHTML=`<span>Gemini <code>${esc(c.gemini_base_url)}</code><i class="${c.gemini_key_configured?'ok':'bad'}">${c.gemini_key_configured?'已配置':'缺少Key'}</i></span><span>Flow <code>${esc(c.flow_base_url)}</code><i class="${c.flow_key_configured?'ok':'bad'}">${c.flow_key_configured?'已配置':'缺少Key'}</i></span><span>飞书 <i class="${c.feishu_configured?'ok':'bad'}">${c.feishu_configured?'已配置':'未配置'}</i></span>`;renderRuns();schedulePoll(d.running)}
     function renderRuns(){$('runs').innerHTML=state.runs.length?state.runs.map(run=>`<article class="run"><button class="runbtn" onclick="openRun('${esc(run.id)}')"><span class="runid">${esc(run.id)}</span><span class="runmeta"><b>${run.verified_count||0} 条核验热点 · ${run.generated_count||0} 张图片</b><small>${new Date(run.started_at).toLocaleString()} · ${run.trigger_type==='scheduled'?'定时':'手动'} · ${duration(run.duration_ms)}</small></span><span class="pill ${esc(run.status)}">${esc(statusName(run.status))}</span></button></article>`).join(''):'<div class="empty">还没有轮次，先发现一次海外热点</div>'}
     function schedulePoll(running){clearTimeout(pollTimer);pollTimer=setTimeout(async()=>{await loadState();if(currentRun)await openRun(currentRun.id,true)},running?3000:15000)}
-    async function fullRun(){if(!confirm('获取海外社媒热点，并为全部可用结果直接生成可印刷图案？'))return;try{const result=await api('/api/runs/full',{method:'POST'});toast(`已启动 ${result.run_id}`);await loadState()}catch(error){toast(error.message)}}
+    async function fullRun(){if(!confirm('获取全球社媒热点，并把图案直接生成到最匹配的物品上？'))return;try{const result=await api('/api/runs/full',{method:'POST'});toast(`已启动 ${result.run_id}`);await loadState()}catch(error){toast(error.message)}}
     async function testConnections(){try{const result=await api('/api/connections/test',{method:'POST'});toast(`Gemini ${result.gemini.ok?'正常':'失败'} · Flow ${result.flow.ok?'正常':'失败'}`)}catch(error){toast(error.message)}}
     async function openRun(runId,silent=false){try{currentRun=await api(`/api/runs/${encodeURIComponent(runId)}`);$('detailTitle').textContent=`轮次 ${currentRun.id}`;renderRunDetail();$('detail').classList.remove('hidden')}catch(error){if(!silent)toast(error.message)}}
     function closeDetail(){$('detail').classList.add('hidden');currentRun=null}

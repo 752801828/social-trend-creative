@@ -557,7 +557,7 @@ class TrendService:
 
     def _discovery_prompt(self, config: dict[str, Any]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are a real-time overseas social-media visual-trend researcher for print-on-demand artwork.
+        return f"""You are a real-time worldwide social-media visual-trend researcher for print-on-demand products.
 
 Current time: {now}
 Lookback window: the previous {config['lookback_hours']} hours
@@ -565,14 +565,14 @@ Target regions: {', '.join(config['regions'])}
 Target platforms: {', '.join(config['platforms'])}
 Return at most {config['candidate_count']} candidate trends.
 
-You must use any internet-search capability available in the current Gemini session. Find current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols that can be transformed into original printable artwork.
+You must use any internet-search capability available in the current Gemini session. Search worldwide; treat the target regions as priority coverage rather than exclusive boundaries. Find current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols that can be transformed into original designs printed directly on physical products.
 
 Rules:
-1. Every result must have a concrete visual motif suitable for printing on many object types, such as mugs, phone cases, clothing, covers, stickers, and posters.
+1. Every result must have a concrete visual motif and one recommended physical product. Choose the best fit from mugs, tumblers, phone cases, T-shirts, hoodies, tote bags, cushions, blankets, vehicle spare-tire covers, stickers, posters, or another clearly named printable item.
 2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful visual opportunity only because evidence is unavailable.
 3. Use null when a value cannot be verified.
 4. Reject gambling, adult content, graphic violence, obvious misinformation, hate, trademarks, copyrighted characters, and ideas dependent on a real person's likeness.
-5. Prefer recognizable shapes, color moods, symbols, textures, and compositions that remain useful without copying an existing post or artwork.
+5. Prefer recognizable shapes, color moods, symbols, textures, and compositions that remain useful without copying an existing post or artwork. The visual brief must name the recommended product, artwork style, placement, scale, and background/product color.
 6. Return strict JSON only. Do not use Markdown fences or prose outside JSON.
 
 Schema:
@@ -594,7 +594,7 @@ Schema:
         {{"source_type":"platform","platform":"X","title":"Source title","url":"https://...","published_at":"ISO-8601 or null"}}
       ],
       "confidence": 0.85,
-      "visual_brief_en": "Original standalone printable artwork direction in English",
+      "visual_brief_en": "Recommended product: vehicle spare-tire cover. Artwork: original motif, placement, scale, print treatment, and product/background color in English",
       "risk_flags": []
     }}
   ],
@@ -608,7 +608,7 @@ Schema:
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Review the candidates below and turn each trend into an original, reusable print-art motif. Preserve candidate_id exactly. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent ideas. Do not add new topics. Return strict JSON only.
+Review the candidates below and turn each trend into an original print design applied to one suitable physical product. Preserve candidate_id exactly. For every accepted candidate, visual_brief_en must explicitly name one recommended product and describe the original artwork, placement, scale, print treatment, and product/background color. Choose from mugs, tumblers, phone cases, T-shirts, hoodies, tote bags, cushions, blankets, vehicle spare-tire covers, stickers, posters, or another clearly named printable item. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent ideas. Do not add new topics. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -616,7 +616,7 @@ Candidates:
 Schema:
 {{
   "verified_trends": [
-    {{"candidate_id":"id","decision":"accept","reason":"short reason","confidence":0.8,"visual_brief_en":"polished original visual direction"}}
+    {{"candidate_id":"id","decision":"accept","reason":"short reason","confidence":0.8,"visual_brief_en":"Recommended product, original artwork, placement, scale, print treatment, and product/background color"}}
   ],
   "removed_trends": [
     {{"candidate_id":"id","decision":"reject","reason_code":"duplicate|empty|unsafe","reason":"reason"}}
@@ -732,7 +732,7 @@ Schema:
 
     @staticmethod
     def _flow_prompt(trend: dict[str, Any]) -> str:
-        return f"""Create original standalone print artwork inspired by a current social-media trend.
+        return f"""Create a realistic print-on-demand product image inspired by a current worldwide social-media trend.
 
 Trending topic: {trend['topic_en']}
 Verified context: {trend['summary_zh']}
@@ -740,9 +740,10 @@ Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
 Requirements:
-- Output the artwork itself, not a product mockup and not a scene containing mugs, phone cases, clothing, covers, frames, or packaging.
-- Use a strong centered motif, balanced composition, clean edges, and generous safe margins so it can be cropped for many print surfaces.
-- Prefer bold shapes, controlled colors, legible silhouettes, and print-friendly detail. Use a plain unobtrusive background unless transparency is supported.
+- Render the design printed directly on the single physical product named in the visual direction. If no product is named, choose the best fit from a mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, or poster.
+- Show one main product only, fully visible and easy to inspect. Do not create a collage or show several product types.
+- Make the artwork conform naturally to the product's printable area, curvature, seams, folds, and material. It must look genuinely printed, not digitally pasted on top.
+- Use a clean commercial product-photography composition with a simple neutral setting. Keep the product and printed design sharp and unobstructed.
 - Do not include logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
 - Avoid text unless the trend cannot work without it; any text must be short, correctly spelled, and generic."""
 
