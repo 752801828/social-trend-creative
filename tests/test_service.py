@@ -33,7 +33,7 @@ class TrendServiceTests(unittest.TestCase):
         self.assertTrue(FLOW_MODELS)
         self.assertFalse(any("2k" in model.lower() or "4k" in model.lower() for model in FLOW_MODELS))
 
-    def test_product_candidates_do_not_require_evidence_or_a_final_limit(self):
+    def test_visual_trends_do_not_require_evidence_or_a_final_limit(self):
         candidates = [
             self._candidate(f"candidate-{index}", f"Product {index}", "javascript:missing", None)
             for index in range(1, 7)
@@ -53,14 +53,17 @@ class TrendServiceTests(unittest.TestCase):
         result = self.service._verify_candidates(config, candidates, verification)
         self.assertEqual(result[0]["status"], "rejected")
 
-    def test_prompts_focus_on_products_and_keep_evidence_optional(self):
+    def test_prompts_focus_on_printable_artwork_and_keep_evidence_optional(self):
         prompt = self.service._discovery_prompt(self.service.get_config())
-        self.assertIn("product-selection or product-marketing", prompt)
+        self.assertIn("print-on-demand artwork", prompt)
+        self.assertIn("mugs, phone cases, clothing, covers", prompt)
         self.assertIn("Evidence URLs and publication times are optional", prompt)
         self.assertIn("strict JSON", prompt)
         self.assertIn("TikTok", prompt)
         self.assertIn("Reddit", prompt)
-        self.assertIn("sellable product concept", self.service._flow_prompt(self._candidate("candidate-1", "Product", "", None)))
+        flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
+        self.assertIn("standalone print artwork", flow_prompt)
+        self.assertIn("not a product mockup", flow_prompt)
 
     def test_invalid_model_confidence_does_not_break_discovery(self):
         payload = {"trends": [{"topic_en": "Topic", "confidence": "unknown", "platforms": "X"}]}
@@ -169,9 +172,15 @@ class StaticPageTests(unittest.TestCase):
         cls.html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
     def test_manual_review_controls_are_present(self):
-        self.assertIn("获取商品热点并生图", self.html)
+        self.assertIn("获取热点并生成图案", self.html)
         self.assertIn("生成所选热点", self.html)
         self.assertIn("热点来源平台", self.html)
+
+    def test_generated_images_open_in_an_accessible_viewer(self):
+        self.assertIn('id="imageDialog"', self.html)
+        self.assertIn('onclick="openImage(this)"', self.html)
+        self.assertIn('aria-label="关闭放大图"', self.html)
+        self.assertIn("cursor:zoom-in", self.html)
 
     def test_credentials_are_not_persisted_in_browser_storage(self):
         self.assertNotIn("localStorage", self.html)

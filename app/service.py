@@ -557,7 +557,7 @@ class TrendService:
 
     def _discovery_prompt(self, config: dict[str, Any]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are a real-time overseas social-media product-trend and social-commerce researcher.
+        return f"""You are a real-time overseas social-media visual-trend researcher for print-on-demand artwork.
 
 Current time: {now}
 Lookback window: the previous {config['lookback_hours']} hours
@@ -565,14 +565,14 @@ Target regions: {', '.join(config['regions'])}
 Target platforms: {', '.join(config['platforms'])}
 Return at most {config['candidate_count']} candidate trends.
 
-You must use any internet-search capability available in the current Gemini session. Find current products, product categories, consumer needs, aesthetics, use cases, gifting moments, and social topics that can become product-selection or product-marketing opportunities.
+You must use any internet-search capability available in the current Gemini session. Find current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols that can be transformed into original printable artwork.
 
 Rules:
-1. Every result must have a concrete product angle suitable for e-commerce selection, merchandising, or campaign creative.
-2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful product opportunity only because evidence is unavailable.
+1. Every result must have a concrete visual motif suitable for printing on many object types, such as mugs, phone cases, clothing, covers, stickers, and posters.
+2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful visual opportunity only because evidence is unavailable.
 3. Use null when a value cannot be verified.
-4. Reject gambling, adult content, graphic violence, obvious misinformation, and unsafe product ideas.
-5. Prefer visually demonstrable products, clear consumer demand, and ideas that can become an original commercial image.
+4. Reject gambling, adult content, graphic violence, obvious misinformation, hate, trademarks, copyrighted characters, and ideas dependent on a real person's likeness.
+5. Prefer recognizable shapes, color moods, symbols, textures, and compositions that remain useful without copying an existing post or artwork.
 6. Return strict JSON only. Do not use Markdown fences or prose outside JSON.
 
 Schema:
@@ -587,14 +587,14 @@ Schema:
       "why_trending": "Why it is trending",
       "platforms": ["X"],
       "region": "Primary region",
-      "category": "product category",
+      "category": "trend category",
       "first_seen_at": "ISO-8601 or null",
       "engagement_signal": "Verified signal or null",
       "evidence": [
         {{"source_type":"platform","platform":"X","title":"Source title","url":"https://...","published_at":"ISO-8601 or null"}}
       ],
       "confidence": 0.85,
-      "visual_brief_en": "Product-focused commercial image direction in English",
+      "visual_brief_en": "Original standalone printable artwork direction in English",
       "risk_flags": []
     }}
   ],
@@ -603,12 +603,12 @@ Schema:
 
     def _verification_prompt(self, config: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are the product-opportunity editor for overseas social-media trends.
+        return f"""You are the visual-pattern editor for overseas social-media trends.
 
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Review the candidates below and polish each product angle and commercial visual direction. Preserve candidate_id exactly. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, or unsafe product ideas. Do not add new topics. Return strict JSON only.
+Review the candidates below and turn each trend into an original, reusable print-art motif. Preserve candidate_id exactly. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent ideas. Do not add new topics. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -703,7 +703,7 @@ Schema:
                 item["verification_note"] = removed[candidate_id]
             else:
                 item["status"] = "ready"
-                item["verification_note"] = str((decision or {}).get("reason") or "商品创意可用")[:500]
+                item["verification_note"] = str((decision or {}).get("reason") or "热点图案可用")[:500]
                 item["confidence"] = max(item["confidence"], confidence((decision or {}).get("confidence")))
                 if str((decision or {}).get("visual_brief_en") or "").strip():
                     item["visual_brief_en"] = str(decision["visual_brief_en"])[:3000]
@@ -732,7 +732,7 @@ Schema:
 
     @staticmethod
     def _flow_prompt(trend: dict[str, Any]) -> str:
-        return f"""Create an original product-focused commercial image inspired by a current social-media trend.
+        return f"""Create original standalone print artwork inspired by a current social-media trend.
 
 Trending topic: {trend['topic_en']}
 Verified context: {trend['summary_zh']}
@@ -740,11 +740,11 @@ Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
 Requirements:
-- Turn the trend into a tangible, sellable product concept or a product-marketing scene.
-- Make the product or product category the clear central subject with strong visual hierarchy.
-- Use a modern international e-commerce and social-ad aesthetic, high detail, clean lighting, and realistic materials.
-- Do not include unreadable text, logos, trademarks, existing packaging, copied posts, or copyrighted compositions.
-- Do not make unsupported performance, health, or endorsement claims."""
+- Output the artwork itself, not a product mockup and not a scene containing mugs, phone cases, clothing, covers, frames, or packaging.
+- Use a strong centered motif, balanced composition, clean edges, and generous safe margins so it can be cropped for many print surfaces.
+- Prefer bold shapes, controlled colors, legible silhouettes, and print-friendly detail. Use a plain unobtrusive background unless transparency is supported.
+- Do not include logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
+- Avoid text unless the trend cannot work without it; any text must be short, correctly spelled, and generic."""
 
     def _update_run(self, run_id: str, **values: Any) -> None:
         if not values:
