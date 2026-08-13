@@ -54,8 +54,8 @@ class ConfigUpdate(BaseModel):
     notify_enabled: bool | None = None
 
 
-class GenerateRequest(BaseModel):
-    trend_ids: list[str] = Field(min_length=1, max_length=30)
+class PoolRequest(BaseModel):
+    count: int | None = Field(default=None, ge=1, le=30)
 
 
 @app.get("/")
@@ -94,7 +94,7 @@ async def test_connections():
 
 @app.post("/api/runs/discover", dependencies=[Depends(require_admin)], status_code=202)
 async def discover():
-    run_id = service.launch_discovery(trigger_type="manual", auto_generate=False)
+    run_id = service.launch_acquisition(trigger_type="manual")
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
     return {"run_id": run_id, "status": "accepted"}
@@ -102,7 +102,7 @@ async def discover():
 
 @app.post("/api/runs/full", dependencies=[Depends(require_admin)], status_code=202)
 async def full_run():
-    run_id = service.launch_discovery(trigger_type="manual", auto_generate=True)
+    run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=True)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
     return {"run_id": run_id, "status": "accepted", "auto_generate": True}
@@ -116,15 +116,37 @@ async def get_run(run_id: str):
     return run
 
 
-@app.post("/api/runs/{run_id}/generate", dependencies=[Depends(require_admin)], status_code=202)
-async def generate(run_id: str, request: GenerateRequest):
+@app.post("/api/runs/{run_id}/classify", dependencies=[Depends(require_admin)], status_code=202)
+async def classify(run_id: str):
     try:
-        launched = service.launch_generation(run_id, request.trend_ids)
+        launched = service.launch_classification(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted", "trend_ids": request.trend_ids}
+    return {"run_id": run_id, "status": "accepted"}
+
+
+@app.post("/api/runs/{run_id}/prompts", dependencies=[Depends(require_admin)], status_code=202)
+async def prompts(run_id: str, request: PoolRequest):
+    try:
+        launched = service.launch_prompt_pool(run_id, request.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted", "count": request.count}
+
+
+@app.post("/api/runs/{run_id}/generate", dependencies=[Depends(require_admin)], status_code=202)
+async def generate(run_id: str, request: PoolRequest):
+    try:
+        launched = service.launch_generation(run_id, request.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
 @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(require_admin)])

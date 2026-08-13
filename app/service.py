@@ -187,6 +187,16 @@ class TrendService:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_trends_run ON trends(run_id, rank);
+                CREATE TABLE IF NOT EXISTS prompt_pool (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    trend_id TEXT NOT NULL REFERENCES trends(id) ON DELETE CASCADE,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    used_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_prompt_pool_run ON prompt_pool(run_id, created_at);
                 CREATE TABLE IF NOT EXISTS generations (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -206,6 +216,9 @@ class TrendService:
                 CREATE INDEX IF NOT EXISTS idx_generations_run ON generations(run_id, trend_id);
                 """
             )
+            generation_columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
+            if "prompt_id" not in generation_columns:
+                db.execute("ALTER TABLE generations ADD COLUMN prompt_id TEXT")
             if not db.execute("SELECT 1 FROM settings WHERE id = 1").fetchone():
                 db.execute(
                     "INSERT INTO settings(id, value, updated_at) VALUES(1, ?, ?)",
@@ -299,119 +312,221 @@ class TrendService:
             )
         return run_id
 
-    def launch_discovery(self, *, trigger_type: str = "manual", auto_generate: bool = False) -> str | None:
+    def _launch(self, run_id: str, coroutine: Any, name: str) -> bool:
+        if self.active_task and not self.active_task.done():
+            coroutine.close()
+            return False
+        self.active_run_id = run_id
+        self.active_task = asyncio.create_task(coroutine, name=name)
+        return True
+
+    def launch_acquisition(self, *, trigger_type: str = "manual") -> str | None:
         if self.active_task and not self.active_task.done():
             return None
         run_id = self.create_run(trigger_type)
-        self.active_run_id = run_id
-        self.active_task = asyncio.create_task(self._run_discovery(run_id, auto_generate), name=f"trend-{run_id}")
+        self._launch(run_id, self._run_stage(run_id, "acquisition"), f"acquire-{run_id}")
         return run_id
 
-    def launch_generation(self, run_id: str, trend_ids: list[str]) -> bool:
-        if self.active_task and not self.active_task.done():
-            return False
+    def launch_classification(self, run_id: str) -> bool:
         with self._connect() as db:
-            valid = db.execute(
-                f"SELECT id FROM trends WHERE run_id = ? AND status IN ('ready', 'needs_review') AND id IN ({','.join('?' for _ in trend_ids)})",
-                (run_id, *trend_ids),
-            ).fetchall() if trend_ids else []
-        selected = [row["id"] for row in valid]
-        if not selected:
-            raise ValueError("没有可生成的已选热点")
-        self.active_run_id = run_id
-        self.active_task = asyncio.create_task(self._run_generation(run_id, selected), name=f"generate-{run_id}")
-        return True
+            run = db.execute("SELECT raw_discovery FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run:
+            raise ValueError("轮次不存在")
+        if not run["raw_discovery"]:
+            raise ValueError("原始热点为空，请先获取热点")
+        with self._connect() as db:
+            exists = db.execute("SELECT 1 FROM trends WHERE run_id=? LIMIT 1", (run_id,)).fetchone()
+        if exists:
+            raise ValueError("热点池已存在；重新分类会破坏已有提示词和图片")
+        return self._launch(run_id, self._run_stage(run_id, "classification"), f"classify-{run_id}")
 
-    async def _run_discovery(self, run_id: str, auto_generate: bool) -> None:
+    def launch_prompt_pool(self, run_id: str, count: int | None = None) -> bool:
+        with self._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM trends WHERE run_id=? AND status!='rejected' LIMIT 1", (run_id,)
+            ).fetchone()
+        if not exists:
+            raise ValueError("热点池为空，请先执行AI拆分分类")
+        return self._launch(run_id, self._run_stage(run_id, "prompt_pool", count), f"prompts-{run_id}")
+
+    def launch_generation(self, run_id: str, count: int | None = None) -> bool:
+        with self._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM prompt_pool WHERE run_id=? AND status='ready' LIMIT 1", (run_id,)
+            ).fetchone()
+        if not exists:
+            raise ValueError("提示词池为空，请先生成提示词池")
+        return self._launch(run_id, self._run_stage(run_id, "generation", count), f"generate-{run_id}")
+
+    def launch_full_pipeline(self, *, trigger_type: str = "manual", auto_generate: bool = True) -> str | None:
+        if self.active_task and not self.active_task.done():
+            return None
+        run_id = self.create_run(trigger_type)
+        self._launch(
+            run_id,
+            self._run_stage(run_id, "full", auto_generate=auto_generate),
+            f"pipeline-{run_id}",
+        )
+        return run_id
+
+    async def _run_stage(
+        self,
+        run_id: str,
+        stage: str,
+        count: int | None = None,
+        *,
+        auto_generate: bool = True,
+    ) -> None:
         async with self.operation_lock:
             started = time.perf_counter()
             config = self.get_config()
             try:
-                self._update_run(run_id, status="running", stage="discovery")
-                discovery_prompt = self._discovery_prompt(config)
-                discovery_text = await self._call_gemini(discovery_prompt, config["gemini_discovery_model"], attempts=3)
-                discovery = extract_json_object(discovery_text)
-                candidates = self._normalise_candidates(discovery, config["candidate_count"])
-                self._update_run(
-                    run_id,
-                    raw_discovery=discovery_text,
-                    candidate_count=len(candidates),
-                    stage="verification",
-                )
-                if not candidates:
-                    raise ValueError("Gemini没有返回可解析的热点候选")
-                verification_text = await self._call_gemini(
-                    self._verification_prompt(config, candidates),
-                    config["gemini_verification_model"],
-                    attempts=2,
-                )
-                verification = extract_json_object(verification_text)
-                trends = self._verify_candidates(config, candidates, verification)
-                self._replace_trends(run_id, trends)
-                usable = [item for item in trends if item["status"] == "ready"]
-                self._update_run(
-                    run_id,
-                    raw_verification=verification_text,
-                    verified_count=len(usable),
-                    status="awaiting_generation" if usable else "failed",
-                    stage="review" if usable else "finished",
-                    error="" if usable else "没有通过核验的热点",
-                )
-                if auto_generate and usable:
-                    await self._generate_selected(run_id, [item["id"] for item in usable])
-                    self._finish_duration(run_id, started)
-                else:
-                    self._finish_duration(run_id, started)
+                if stage in {"acquisition", "full"}:
+                    await self._acquire_raw_trends(run_id, config)
+                if stage in {"classification", "full"}:
+                    await self._classify_trend_pool(run_id, config)
+                if stage in {"prompt_pool", "full"}:
+                    await self._create_prompt_pool(run_id, config, count)
+                if stage == "generation" or (stage == "full" and auto_generate):
+                    await self._generate_from_prompt_pool(run_id, config, count)
+                self._finish_duration(run_id, started)
+                if stage != "generation" and not (stage == "full" and auto_generate):
                     await self._notify_run(run_id)
             except asyncio.CancelledError:
                 self._update_run(run_id, status="cancelled", stage="finished", error="任务已取消", finished_at=utc_now())
                 self._finish_duration(run_id, started)
                 raise
             except Exception as exc:
-                logger.exception("Trend discovery failed")
+                logger.exception("Pipeline stage %s failed", stage)
                 self._update_run(run_id, status="failed", stage="finished", error=safe_error(exc), finished_at=utc_now())
                 self._finish_duration(run_id, started)
                 await self._notify_run(run_id)
             finally:
                 self.active_run_id = None
 
-    async def _run_generation(self, run_id: str, trend_ids: list[str]) -> None:
-        async with self.operation_lock:
-            started = time.perf_counter()
-            try:
-                await self._generate_selected(run_id, trend_ids)
-                self._finish_duration(run_id, started)
-            except asyncio.CancelledError:
-                self._update_run(run_id, status="cancelled", stage="finished", error="任务已取消", finished_at=utc_now())
-                self._finish_duration(run_id, started)
-                raise
-            except Exception as exc:
-                logger.exception("Trend generation failed")
-                self._update_run(run_id, status="failed", stage="finished", error=safe_error(exc), finished_at=utc_now())
-                self._finish_duration(run_id, started)
-            finally:
-                self.active_run_id = None
+    async def _acquire_raw_trends(self, run_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+        self._update_run(run_id, status="running", stage="acquisition", error="")
+        discovery_text = await self._call_gemini(
+            self._discovery_prompt(config), config["gemini_discovery_model"], attempts=3
+        )
+        candidates = self._normalise_candidates(
+            extract_json_object(discovery_text), config["candidate_count"]
+        )
+        if not candidates:
+            raise ValueError("Gemini没有返回可解析的原始热点")
+        self._update_run(
+            run_id,
+            raw_discovery=discovery_text,
+            candidate_count=len(candidates),
+            status="awaiting_classification",
+            stage="raw_trends",
+        )
+        return candidates
 
-    async def _generate_selected(self, run_id: str, trend_ids: list[str]) -> None:
-        config = self.get_config()
+    async def _classify_trend_pool(self, run_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT * FROM trends WHERE run_id = ? AND id IN ({','.join('?' for _ in trend_ids)}) ORDER BY rank",
-                (run_id, *trend_ids),
-            ).fetchall()
-        trends = [dict(row) for row in rows]
+            row = db.execute("SELECT raw_discovery FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not row or not row["raw_discovery"]:
+            raise ValueError("原始热点为空，请先获取热点")
+        candidates = self._normalise_candidates(
+            extract_json_object(row["raw_discovery"]), config["candidate_count"]
+        )
+        self._update_run(run_id, status="running", stage="classification", error="")
+        verification_text = await self._call_gemini(
+            self._classification_prompt(config, candidates),
+            config["gemini_verification_model"],
+            attempts=2,
+        )
+        payload = extract_json_object(verification_text)
+        if isinstance(payload.get("classified_trends"), list):
+            trends = self._normalise_candidates(
+                {"trends": payload["classified_trends"]}, config["candidate_count"] * 3
+            )
+            trends = self._trend_pool_entries(trends)
+        else:
+            trends = self._verify_candidates(config, candidates, payload)
+        self._replace_trends(run_id, trends)
+        usable = [item for item in trends if item["status"] == "ready"]
+        self._update_run(
+            run_id,
+            raw_verification=verification_text,
+            verified_count=len(usable),
+            status="trend_pool_ready" if usable else "failed",
+            stage="trend_pool" if usable else "finished",
+            error="" if usable else "热点池为空",
+        )
+        return usable
+
+    async def _create_prompt_pool(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        count: int | None,
+    ) -> list[str]:
+        with self._connect() as db:
+            trends = [dict(row) for row in db.execute(
+                "SELECT * FROM trends WHERE run_id=? AND status!='rejected'", (run_id,)
+            ).fetchall()]
+        if not trends:
+            raise ValueError("热点池为空，请先执行AI拆分分类")
+        selected = random.sample(
+            trends,
+            min(len(trends), max(1, count or config["candidate_count"])),
+        )
+        self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
+        response_text = await self._call_gemini(
+            self._prompt_pool_prompt(selected), config["gemini_verification_model"], attempts=2
+        )
+        payload = extract_json_object(response_text)
+        supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
+        supplied_map = {
+            str(item.get("trend_id")): str(item.get("prompt") or "").strip()
+            for item in supplied if isinstance(item, dict)
+        }
+        prompt_ids = []
+        with self._connect() as db:
+            for trend in selected:
+                prompt_id = secrets.token_hex(12)
+                prompt = supplied_map.get(trend["id"]) or self._flow_prompt(trend)
+                db.execute(
+                    "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?, 'ready', ?)",
+                    (prompt_id, run_id, trend["id"], prompt[:10000], utc_now()),
+                )
+                prompt_ids.append(prompt_id)
+        self._update_run(run_id, status="prompt_pool_ready", stage="prompt_pool")
+        return prompt_ids
+
+    async def _generate_from_prompt_pool(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        count: int | None,
+    ) -> None:
+        with self._connect() as db:
+            prompts = [dict(row) for row in db.execute(
+                """SELECT t.*, p.id AS prompt_id, p.prompt AS pool_prompt
+                   FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
+                   WHERE p.run_id=? AND p.status='ready'""",
+                (run_id,),
+            ).fetchall()]
+        if not prompts:
+            raise ValueError("提示词池为空，请先生成提示词池")
+        selected = random.sample(prompts, min(len(prompts), max(1, count or config["images_per_trend"])))
         self._update_run(run_id, status="running", stage="generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
-        async def guarded(trend: dict[str, Any], sequence: int) -> bool:
+        async def guarded(item: dict[str, Any], sequence: int) -> bool:
             async with semaphore:
-                return await self._generate_one(run_id, trend, sequence, config)
+                return await self._generate_one(
+                    run_id,
+                    item,
+                    sequence,
+                    config,
+                    prompt_id=item["prompt_id"],
+                    prompt_text=item["pool_prompt"],
+                )
 
-        results = await asyncio.gather(*(
-            guarded(trend, sequence)
-            for trend in trends
-            for sequence in range(1, config["images_per_trend"] + 1)
-        ))
+        results = await asyncio.gather(*(guarded(item, index) for index, item in enumerate(selected, 1)))
         success = sum(bool(item) for item in results)
         failed = len(results) - success
         with self._connect() as db:
@@ -432,18 +547,31 @@ class TrendService:
         )
         await self._notify_run(run_id)
 
-    async def _generate_one(self, run_id: str, trend: dict[str, Any], sequence: int, config: dict[str, Any]) -> bool:
+    async def _generate_one(
+        self,
+        run_id: str,
+        trend: dict[str, Any],
+        sequence: int,
+        config: dict[str, Any],
+        *,
+        prompt_id: str | None = None,
+        prompt_text: str | None = None,
+    ) -> bool:
         generation_id = secrets.token_hex(12)
         model = random.choice(config["flow_models"])
-        prompt = self._flow_prompt(trend)
+        prompt = prompt_text or self._flow_prompt(trend)
         started = time.perf_counter()
         with self._connect() as db:
             db.execute(
                 """INSERT INTO generations
-                   (id, run_id, trend_id, sequence, model, prompt, status, created_at)
-                   VALUES(?, ?, ?, ?, ?, ?, 'running', ?)""",
-                (generation_id, run_id, trend["id"], sequence, model, prompt, utc_now()),
+                   (id, run_id, trend_id, prompt_id, sequence, model, prompt, status, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
+                (generation_id, run_id, trend["id"], prompt_id, sequence, model, prompt, utc_now()),
             )
+            if prompt_id:
+                db.execute(
+                    "UPDATE prompt_pool SET used_count=used_count+1 WHERE id=?", (prompt_id,)
+                )
             db.execute("UPDATE trends SET status = 'generating' WHERE id = ?", (trend["id"],))
         try:
             response_text, image_bytes, mime_type = await self._call_flow(prompt, model)
@@ -565,14 +693,14 @@ Target regions: {', '.join(config['regions'])}
 Target platforms: {', '.join(config['platforms'])}
 Return at most {config['candidate_count']} candidate trends.
 
-You must use any internet-search capability available in the current Gemini session. Search worldwide; treat the target regions as priority coverage rather than exclusive boundaries. Find current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols that can be transformed into original designs printed directly on physical products.
+You must use any internet-search capability available in the current Gemini session. Search worldwide; treat the target regions as priority coverage rather than exclusive boundaries. Collect broad raw trends: current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols. Do not choose products or write image prompts in this acquisition stage.
 
 Rules:
-1. Every result must have a concrete visual motif and one recommended physical product. Choose the best fit from mugs, tumblers, phone cases, T-shirts, hoodies, tote bags, cushions, blankets, vehicle spare-tire covers, stickers, posters, or another clearly named printable item.
+1. Each result is a raw social signal. Keep separate movements separate, but do not turn one signal into product concepts yet.
 2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful visual opportunity only because evidence is unavailable.
 3. Use null when a value cannot be verified.
 4. Reject gambling, adult content, graphic violence, obvious misinformation, hate, trademarks, copyrighted characters, and ideas dependent on a real person's likeness.
-5. Prefer recognizable shapes, color moods, symbols, textures, and compositions that remain useful without copying an existing post or artwork. The visual brief must name the recommended product, artwork style, placement, scale, and background/product color.
+5. Prefer signals with recognizable shapes, color moods, symbols, textures, communities, or emotional hooks that can be analyzed later without copying an existing post or artwork.
 6. Return strict JSON only. Do not use Markdown fences or prose outside JSON.
 
 Schema:
@@ -594,34 +722,75 @@ Schema:
         {{"source_type":"platform","platform":"X","title":"Source title","url":"https://...","published_at":"ISO-8601 or null"}}
       ],
       "confidence": 0.85,
-      "visual_brief_en": "Recommended product: vehicle spare-tire cover. Artwork: original motif, placement, scale, print treatment, and product/background color in English",
+      "visual_brief_en": "Optional raw visual observation, not an image prompt",
       "risk_flags": []
     }}
   ],
   "rejected": [{{"topic":"topic","reason":"reason"}}]
 }}"""
 
-    def _verification_prompt(self, config: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+    def _classification_prompt(self, config: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are the visual-pattern editor for overseas social-media trends.
+        return f"""You are the AI classifier that builds a reusable worldwide trend pool.
 
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Review the candidates below and turn each trend into an original print design applied to one suitable physical product. Preserve candidate_id exactly. For every accepted candidate, visual_brief_en must explicitly name one recommended product and describe the original artwork, placement, scale, print treatment, and product/background color. Choose from mugs, tumblers, phone cases, T-shirts, hoodies, tote bags, cushions, blankets, vehicle spare-tire covers, stickers, posters, or another clearly named printable item. Missing evidence or publication time is not a rejection reason, and there is no maximum accepted count. Reject only duplicate, empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent ideas. Do not add new topics. Return strict JSON only.
+Split broad raw trends into independently usable creative angles, merge duplicates, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood. A raw trend may produce multiple classified entries when it contains distinct visual angles. Each entry must preserve factual context and include a reusable visual direction, but it must not be a finished image prompt or choose a physical product yet. Missing evidence or publication time is not a rejection reason. Exclude only empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent angles. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
 
 Schema:
 {{
-  "verified_trends": [
-    {{"candidate_id":"id","decision":"accept","reason":"short reason","confidence":0.8,"visual_brief_en":"Recommended product, original artwork, placement, scale, print treatment, and product/background color"}}
-  ],
-  "removed_trends": [
-    {{"candidate_id":"id","decision":"reject","reason_code":"duplicate|empty|unsafe","reason":"reason"}}
+  "classified_trends": [
+    {{
+      "topic_en":"independent English angle",
+      "topic_zh":"独立中文角度",
+      "summary_zh":"事实摘要",
+      "why_trending":"传播原因",
+      "platforms":["X"],
+      "region":"Global",
+      "category":"culture",
+      "first_seen_at":null,
+      "engagement_signal":"signal or null",
+      "evidence":[],
+      "confidence":0.8,
+      "visual_brief_en":"Reusable visual motif and mood, not a finished prompt",
+      "risk_flags":[]
+    }}
   ]
 }}"""
+
+    @staticmethod
+    def _prompt_pool_prompt(trends: list[dict[str, Any]]) -> str:
+        compact = [
+            {
+                "trend_id": item["id"],
+                "topic_en": item["topic_en"],
+                "summary_zh": item["summary_zh"],
+                "why_trending": item["why_trending"],
+                "category": item["category"],
+                "visual_brief_en": item["visual_brief_en"],
+            }
+            for item in trends
+        ]
+        return f"""You create production-ready image prompts from randomly selected worldwide trend-pool entries.
+
+For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Keep the trend's original idea and category, select one suitable physical item, and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting.
+
+Rules:
+1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
+2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
+3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
+4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
+5. Return strict JSON only and preserve every trend_id exactly.
+
+Trend-pool entries:
+{json.dumps(compact, ensure_ascii=False)}
+
+Schema:
+{{"prompts":[{{"trend_id":"id","prompt":"complete English image prompt"}}]}}"""
 
     @staticmethod
     def _normalise_candidates(payload: dict[str, Any], limit: int) -> list[dict[str, Any]]:
@@ -711,6 +880,18 @@ Schema:
             output.append(item)
         return output
 
+    @staticmethod
+    def _trend_pool_entries(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output = []
+        for candidate in candidates:
+            item = copy.deepcopy(candidate)
+            item.pop("candidate_id", None)
+            item["id"] = secrets.token_hex(12)
+            item["status"] = "ready"
+            item["verification_note"] = "AI已拆分分类"
+            output.append(item)
+        return output
+
     def _replace_trends(self, run_id: str, trends: list[dict[str, Any]]) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM trends WHERE run_id = ?", (run_id,))
@@ -775,6 +956,11 @@ Requirements:
             generations = [dict(row) for row in db.execute(
                 "SELECT * FROM generations WHERE run_id = ? ORDER BY created_at", (run_id,)
             ).fetchall()]
+            prompt_pool = [dict(row) for row in db.execute(
+                """SELECT p.*, t.topic_zh, t.category FROM prompt_pool p
+                   JOIN trends t ON t.id=p.trend_id WHERE p.run_id=? ORDER BY p.created_at""",
+                (run_id,),
+            ).fetchall()]
         generation_map: dict[str, list[dict[str, Any]]] = {}
         for generation in generations:
             if generation.get("image_path"):
@@ -786,6 +972,15 @@ Requirements:
             trend["generations"] = generation_map.get(trend["id"], [])
         result = dict(run)
         result["trends"] = trends
+        result["prompt_pool"] = prompt_pool
+        result["raw_trends"] = []
+        if result.get("raw_discovery"):
+            try:
+                result["raw_trends"] = self._normalise_candidates(
+                    extract_json_object(result["raw_discovery"]), 30
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                logger.warning("Run %s contains an unreadable raw discovery response", run_id)
         return result
 
     def delete_run(self, run_id: str) -> bool:
@@ -837,7 +1032,7 @@ Requirements:
                     local = datetime.now(ZoneInfo(config["timezone"]))
                     date_key = local.date().isoformat()
                     if local.strftime("%H:%M") >= config["schedule_time"] and self._last_scheduled_date != date_key:
-                        run_id = self.launch_discovery(
+                        run_id = self.launch_full_pipeline(
                             trigger_type="scheduled",
                             auto_generate=bool(config.get("auto_generate")),
                         )

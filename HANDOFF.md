@@ -1,13 +1,11 @@
 # Social Trend Creative 新对话交接
 
-本文件用于把本项目完整移交到新的 Codex 对话。后续不要在原 Gemini2API/Flow2API 对话中继续开发本项目。
+本文件用于把项目完整移交到新的 Codex 对话。后续不要在 Gemini2API/Flow2API 项目中继续开发本项目。
 
 ## 新对话启动语
 
-把下面这段直接发送到新对话：
-
 ```text
-请接手 social-trend-creative 项目。先完整阅读仓库根目录的 AGENTS.md、HANDOFF.md、CONTEXT.md、README.md，以及 docs/PROJECT_OVERVIEW_AND_CHANGELOG.md；然后检查 git status、当前分支和最近提交，不要重复已经完成的工作。项目必须保持独立，只通过 HTTP API 调用 Gemini2API 和 Flow2API。每次代码、配置、UI、API、数据或部署修改都要同步更新 docs/PROJECT_OVERVIEW_AND_CHANGELOG.md；不要提交 .env、API Key、Cookie、Webhook、签名密钥、数据库或生成图片。完成修改后运行测试、提交并推送 main，再返回服务机的 git pull 与 docker compose 更新命令。
+请接手 social-trend-creative 项目。先完整阅读仓库根目录的 AGENTS.md、HANDOFF.md、CONTEXT.md、README.md，以及 docs/PROJECT_OVERVIEW_AND_CHANGELOG.md；然后检查 git status、当前分支和最近提交，不要重复已经完成的工作。项目必须保持独立，只通过 HTTP API 调用 Gemini2API 和 Flow2API。每次代码、配置、UI、API、数据或部署修改都要同步更新 docs/PROJECT_OVERVIEW_AND_CHANGELOG.md；不要提交 .env、API Key、Cookie、Webhook、签名密钥、数据库或生成图片。完成修改后运行测试，再汇报 Git 状态；只有用户明确要求时才提交或推送。
 ```
 
 ## 仓库与路径
@@ -17,7 +15,7 @@
 - 本机目录：`C:\Users\WY001\Documents\反代\social-trend-creative`
 - 服务机目录：`D:\social-trend-creative`
 - 服务端口：`5920`
-- Docker 服务与容器：`social-trend-creative`
+- Docker 服务：`social-trend-creative`
 
 开始工作前执行：
 
@@ -25,64 +23,107 @@
 cd /d C:\Users\WY001\Documents\反代\social-trend-creative
 git status -sb
 git log -5 --oneline
-git pull --ff-only origin main
 ```
 
-## 项目目标与边界
+注意：在 `C:\Users\WY001` 直接执行 `git push` 会提示 `not a git repository`；必须先进入上述仓库目录。
 
-这是独立的全球社媒热点物品图创作服务：
+## 当前架构
 
-1. Gemini2API 在全球范围发现最近时间窗口内的社媒事件、梗、情绪、审美、社群和视觉符号；配置地区仅为优先覆盖，不是排他过滤。
-2. Gemini2API 第二次为每条候选选择一种杯子、手机壳、衣服、备胎罩等合适物品，并定义图案、位置、比例、印刷处理和底色。
-3. 本服务保留可用来源并执行重复、空内容和安全检查；来源与时间不作为生图门禁。
-4. 手动主流程获取热点后，Flow2API 为全部可用候选直接生成单一物品效果图，图案自然贴合物品曲面、褶皱、接缝和材质。
-5. SQLite 保存轮次、热点、证据、提示词、图片、耗时和错误。
+系统是四个彼此独立、可单独触发的阶段：
 
-项目不得导入、复制或修改 Gemini2API/Flow2API 源码，也不得启动、停止或重建它们的容器。两个上游只通过 OpenAI 兼容 HTTP API 连接。
+1. 热点获取：Gemini 获取全球原始社媒信号，不选物品、不写生图提示词。
+2. AI 拆分分类：将宽泛原始热点拆成可独立使用的创意角度，合并重复并分类，写入热点池 `trends`。
+3. 提示词生成：随机抽取热点池条目，为每条生成完整的物品效果图提示词，追加到 `prompt_pool`。
+4. 生图：随机抽取 `prompt_pool` 条目交给 Flow，图片记录保存对应 `prompt_id`。
 
-## 工作流与状态
+核心关系为：
 
-- `ready`：热点图案方向可用且未被判定为重复、空内容、不安全或依赖商标、版权角色、真人肖像；无论是否有证据都可以直接生图。
-- `needs_review`：仅为兼容旧轮次保留，新发现流程不再因来源时间缺失进入此状态。
-- `rejected`：重复、空内容或明确不安全的候选，禁止生图。
-- 任一时刻只允许一个发现或生成任务执行，冲突返回 HTTP `409`。
-- 定时任务及其自动生图默认关闭；手动完整流程会直接生图，上线前必须先人工验证数轮。
-- Prompt-first discovery 不能证明 Gemini 一定进行了实时联网搜索；不得伪造来源，但来源 URL 和发布时间仅作参考，不阻止热点图案生成。
+```text
+Raw trend → Trend-pool entry → Prompt-pool entry → Generation task
+```
+
+生图不能绕过提示词池直接消费热点。提示词池条目可以重复使用，`used_count` 记录使用次数。同一轮次可重复追加提示词；已形成热点池后禁止重新分类，因为替换热点池会级联影响现有提示词和图片。
+
+## 业务边界
+
+- 全球搜索，配置地区只是优先覆盖，不是排他过滤。
+- “热点来源平台”是信号来源，不是图片发布渠道或目标平台。
+- 来源 URL 和发布时间为可选参考，不是流水线门禁；不得伪造来源。
+- 不设最终最多保留热点数量；不能因 `Exceeds the maximum accepted limit of 5 trends` 拒绝候选。
+- 仅排除重复、空内容、明确不安全、依赖商标、版权角色或真人肖像的方向。
+- 第三阶段可选择杯子、随行杯、手机壳、T 恤、卫衣、帆布袋、抱枕、毯子、备胎罩、贴纸、海报或其他可印刷物品。
+- 图案必须自然服从物品曲面、褶皱、接缝、材质、位置和比例；每个提示词只生成一个主要物品。
+- 项目不得导入、复制或修改 Gemini2API/Flow2API 源码，也不得管理其容器。
+
+## 状态与执行规则
+
+- `awaiting_classification`：原始热点已获取。
+- `trend_pool_ready`：AI 拆分分类完成。
+- `prompt_pool_ready`：提示词池已生成或追加。
+- `completed` / `partial` / `failed` / `cancelled`：生图或阶段最终结果。
+- `ready`：热点池或提示词池条目可用。
+- 任一时刻只允许一个阶段任务运行，冲突返回 HTTP `409`。
+- 手动“一键完整流水线”固定运行四阶段。
+- 定时任务固定运行前三阶段；仅在 `auto_generate=true` 时继续随机生图。
+- 调度和定时自动生图默认均关闭。
 
 ## 当前默认策略
 
 - 每日时间：`09:00`
 - 时区：`Asia/Shanghai`
 - 回溯窗口：24 小时
-- 地区：美国、英国、欧洲、全球英语区
-- 平台：X、TikTok、Instagram、YouTube、Reddit
-- 候选数：10
-- 最终热点数：与候选数一致，不再另设保留上限
-- 每个热点图片数：1
-- Gemini 发现模型：`gemini-pro-thinking`
-- Gemini 核验模型：`gemini-flash`
+- 地区：美国、英国、欧洲、全球英语区（优先覆盖）
+- 来源平台：X、TikTok、Instagram、YouTube、Reddit
+- 原始候选数 / 默认随机提示词数：10
+- 每轮随机生图数：1（内部兼容字段仍名为 `images_per_trend`）
+- Gemini 获取模型：`gemini-pro-thinking`
+- Gemini 分类/提示词模型：`gemini-flash`
 - Flow 默认模型：`gemini-3.1-flash-image-landscape`
-- 生图并发：2，接口允许范围 1–5
-- 定时调度：关闭
-- 手动完整流程：获取后直接生图
-- 定时任务自动生图：关闭
-- 飞书通知：关闭
+- 生图并发：2，接口允许 1–5
+- 定时调度、定时自动生图、飞书通知：关闭
 
 可选模型以 `app/service.py` 中的 `GEMINI_MODELS` 和 `FLOW_MODELS` 为唯一事实来源。Flow 模型列表不包含 2K/4K 别名。
 
 ## 主要文件
 
-- `app/main.py`：FastAPI 入口、Bearer 鉴权和管理 API。
-- `app/service.py`：配置、SQLite、Gemini 全球热点视觉提取与物品推荐、Flow 物品效果图生成、调度、安全筛选和飞书通知。
-- `static/index.html`：独立管理页面。
-- `tests/test_service.py`：核心解析、商品候选筛选和数据行为测试。
-- `docker-compose.yml` / `Dockerfile`：独立容器部署。
-- `data/`：SQLite 和生成图片挂载目录；运行数据不进入 Git。
-- `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：项目总览与必须持续更新的变更日志。
+- `app/main.py`：FastAPI、Bearer 鉴权和四阶段管理 API。
+- `app/service.py`：配置、SQLite、四阶段服务、Flow 调用、调度、安全筛选和飞书通知。
+- `static/index.html`：四阶段管理页、轮次详情、提示词池和图片放大。
+- `tests/test_service.py`：解析、阶段隔离、提示词池消费、取消恢复和鉴权隔离测试。
+- `CONTEXT.md`：领域术语和统一命名。
+- `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：必须持续更新的架构总览与变更日志。
+- `data/`：SQLite 和生成图片，不能进入 Git。
+
+## 管理 API
+
+除 `/`、`/health` 和 `/assets/...` 外均使用：
+
+```http
+Authorization: Bearer <ADMIN_KEY>
+```
+
+- `GET /api/state`
+- `PUT /api/config`
+- `POST /api/connections/test`
+- `POST /api/runs/discover`：①获取
+- `POST /api/runs/{run_id}/classify`：②拆分分类
+- `POST /api/runs/{run_id}/prompts`：③随机热点生成提示词池，JSON 为 `{}` 或 `{"count":5}`
+- `POST /api/runs/{run_id}/generate`：④随机提示词生图，JSON 为 `{}` 或 `{"count":3}`
+- `POST /api/runs/full`：①②③④完整流水线
+- `GET /api/runs/{run_id}`
+- `POST /api/runs/{run_id}/cancel`
+- `DELETE /api/runs/{run_id}`
+
+## 数据与迁移
+
+- SQLite：`data/trend-creative.db`
+- 图片：`data/assets/<run>/<trend>/`
+- Docker 挂载：`./data:/app/data`
+- `trends` 是热点池；`prompt_pool` 是提示词池；`generations.prompt_id` 追踪图片使用的提示词。
+- 启动时自动创建 `prompt_pool`，并为旧 `generations` 表补 `prompt_id`，不需要手工迁移。
+- 删除轮次会级联删除热点池、提示词池、生成记录及本地图片；必须保留运行中保护和路径范围检查。
 
 ## 环境变量
-
-从 `.env.example` 复制生成 `.env`，不要把真实值提交到 Git：
 
 ```env
 ADMIN_KEY=<管理密钥>
@@ -97,72 +138,18 @@ DATA_DIR=/app/data
 PORT=5920
 ```
 
-`PUBLIC_BASE_URL`、飞书 Webhook 和签名密钥为可选项。不得在日志、文档、测试或提交中写入真实密钥。
+真实密钥不得写入代码、日志、文档、测试或 Git。
 
-## 管理 API
-
-除 `/`、`/health` 和 `/assets/...` 外，管理 API 使用：
-
-```http
-Authorization: Bearer <ADMIN_KEY>
-```
-
-- `GET /api/state`
-- `PUT /api/config`
-- `POST /api/connections/test`
-- `POST /api/runs/discover`
-- `POST /api/runs/full`：获取全球社媒热点并为全部可用候选直接生成带图案的物品效果图
-- `GET /api/runs/{run_id}`
-- `POST /api/runs/{run_id}/generate`
-- `POST /api/runs/{run_id}/cancel`
-- `DELETE /api/runs/{run_id}`
-
-## 数据与持久化
-
-- SQLite：`data/trend-creative.db`
-- 图片：`data/assets/<run>/<trend>/`
-- Docker 挂载：`./data:/app/data`
-- `.gitignore` 排除 `.env`、数据库、缓存和生成媒体。
-
-删除轮次会同时删除对应数据库记录和本地生成图片。修改删除逻辑前必须保留运行中任务保护和路径范围校验。
-
-## 验证命令
+## 验证与部署
 
 ```cmd
 cd /d C:\Users\WY001\Documents\反代\social-trend-creative
-python -m pytest -q
+python -m unittest discover -s tests -v
+python -m compileall -q app
 docker compose config
 ```
 
-部署后：
-
-```cmd
-curl http://localhost:5920/health
-docker compose ps
-docker compose logs --tail=100 social-trend-creative
-```
-
-预期健康响应：
-
-```json
-{"status":"ok","service":"social-trend-creative"}
-```
-
-## 服务机首次部署
-
-```cmd
-cd /d D:\
-git clone https://github.com/752801828/social-trend-creative.git D:\social-trend-creative
-cd /d D:\social-trend-creative
-copy /Y .env.example .env
-notepad .env
-docker compose up -d --build
-curl http://localhost:5920/health
-```
-
-如果目标目录已经存在，不要直接删除；先确认其中的 `.env` 和 `data` 是否需要保留。
-
-## 服务机后续更新
+服务机更新：
 
 ```cmd
 cd /d D:\social-trend-creative
@@ -174,23 +161,19 @@ curl http://localhost:5920/health
 
 ## 后续修改规则
 
-1. 先读取本文件及 `AGENTS.md`，再检查实际代码和 Git 状态。
-2. 不把 Gemini2API/Flow2API 的账号、Cookie、浏览器 Profile 或代理逻辑耦合进本项目。
-3. 不把提示词返回的“已联网”当作证据，也不伪造来源；来源和时间仅作为可选参考，不作为商品生图门禁。
-4. 不默认开启定时任务或定时自动生图；手动完整流程按热点图案模式直接生图。
-5. 每次功能修改同步更新测试和 `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`。
-6. 默认推送 `752801828/social-trend-creative` 的 `main` 分支。
-7. 每次推送后返回服务机更新命令。
+1. 先读取 `AGENTS.md`、本文件、`CONTEXT.md`、`README.md` 和持续变更日志，再检查代码与 Git。
+2. 不把上游账号、Cookie、浏览器 Profile 或代理逻辑耦合进本项目。
+3. 每次代码、配置、UI、API、数据或部署修改同步更新 `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`，必要时也更新本文件和 README。
+4. 不默认开启定时任务或定时自动生图。
+5. 完成修改后运行测试并报告 Git 状态；提交和推送须遵循用户当次要求。
 
 ## 当前完成状态
 
-- 独立 FastAPI 服务、SQLite、管理页面和 Docker 部署已完成。
-- Gemini 两阶段热点视觉提取与复核、可选来源保存和安全筛选已完成。
-- 人工选题、Flow 多模型随机生图、并发、图片落盘和失败记录已完成。
-- 每日调度、自动生图开关、连接检查和可选飞书通知已完成。
-- 管理页面的统计、轮次详情、来源链接、图片预览、终止和删除已完成。
-- 全球热点视觉发现、Gemini物品推荐、无证据可生图、取消最终保留上限以及手动获取后直接生成物品图已完成。
-- 生成图片支持点击放大查看；平台统计表示各来源平台命中的可用热点数量，不表示发布渠道。
-- 当前测试共 12 项，覆盖全球物品图提示词、无证据候选、取消最终上限、手动直接生图、图片放大、状态恢复和鉴权隔离。
+- 四阶段后端服务、独立接口和一键完整流水线已完成。
+- 原始热点、热点池、提示词池和生成记录已分开持久化。
+- 随机热点生成提示词、随机提示词生图及 `prompt_id` 追踪已完成。
+- 管理页已显示四阶段、提示词池和各池数量，并移除旧的“勾选热点直接生图”。
+- 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
+- 当前测试共 13 项。
 
-新对话应以仓库实际 `main` 分支为准，不依赖原对话上下文。
+新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。

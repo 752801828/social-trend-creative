@@ -53,15 +53,25 @@ class TrendServiceTests(unittest.TestCase):
         result = self.service._verify_candidates(config, candidates, verification)
         self.assertEqual(result[0]["status"], "rejected")
 
-    def test_prompts_focus_on_worldwide_product_mockups_and_keep_evidence_optional(self):
+    def test_each_pipeline_stage_has_a_distinct_prompt(self):
         prompt = self.service._discovery_prompt(self.service.get_config())
         self.assertIn("worldwide social-media", prompt)
-        self.assertIn("vehicle spare-tire covers", prompt)
         self.assertIn("priority coverage rather than exclusive boundaries", prompt)
+        self.assertIn("Do not choose products or write image prompts", prompt)
         self.assertIn("Evidence URLs and publication times are optional", prompt)
         self.assertIn("strict JSON", prompt)
         self.assertIn("TikTok", prompt)
         self.assertIn("Reddit", prompt)
+        classify_prompt = self.service._classification_prompt(
+            self.service.get_config(), [self._candidate("candidate-1", "Trend", "", None)]
+        )
+        self.assertIn("Split broad raw trends", classify_prompt)
+        self.assertIn("classified_trends", classify_prompt)
+        trend = self._candidate("candidate-1", "Trend", "", None)
+        trend.update({"id": "trend-1"})
+        pool_prompt = self.service._prompt_pool_prompt([trend])
+        self.assertIn("randomly selected worldwide trend-pool entries", pool_prompt)
+        self.assertIn("vehicle spare-tire cover", pool_prompt)
         flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
         self.assertIn("printed directly on the single physical product", flow_prompt)
         self.assertIn("vehicle spare-tire cover", flow_prompt)
@@ -79,30 +89,79 @@ class TrendServiceTests(unittest.TestCase):
         self.assertFalse(config["auto_generate"])
         self.assertNotIn("final_count", config)
 
-    def test_explicit_full_run_generates_all_usable_candidates(self):
+    def test_pipeline_builds_separate_trend_and_prompt_pools_before_generation(self):
         discovery = {
             "trends": [
-                {"topic_en": "Product one", "topic_zh": "商品一", "evidence": []},
-                {"topic_en": "Product two", "topic_zh": "商品二", "evidence": []},
+                {"topic_en": "Raw one", "topic_zh": "原始一", "evidence": []},
+                {"topic_en": "Raw two", "topic_zh": "原始二", "evidence": []},
             ]
         }
-        responses = iter((json.dumps(discovery), json.dumps({"verified_trends": []})))
-        generated = []
+        classified = {
+            "classified_trends": [
+                {"topic_en": "Angle one", "topic_zh": "角度一", "category": "culture", "evidence": []},
+                {"topic_en": "Angle two", "topic_zh": "角度二", "category": "humor", "evidence": []},
+            ]
+        }
 
         async def exercise():
+            responses = iter((json.dumps(discovery), json.dumps(classified)))
+
             async def fake_gemini(_prompt, _model, *, attempts):
                 return next(responses)
 
-            async def fake_generate(_run_id, trend_ids):
-                generated.extend(trend_ids)
-
             self.service._call_gemini = fake_gemini
-            self.service._generate_selected = fake_generate
             run_id = self.service.create_run("manual")
-            await self.service._run_discovery(run_id, auto_generate=True)
+            config = self.service.get_config()
+            await self.service._acquire_raw_trends(run_id, config)
+            await self.service._classify_trend_pool(run_id, config)
+            run = self.service.get_run(run_id)
+            self.assertEqual(len(run["raw_trends"]), 2)
+            self.assertEqual([item["category"] for item in run["trends"]], ["culture", "humor"])
+
+            prompt_response = {
+                "prompts": [
+                    {"trend_id": item["id"], "prompt": f"Prompt for {item['topic_en']}"}
+                    for item in run["trends"]
+                ]
+            }
+
+            async def fake_prompt_gemini(_prompt, _model, *, attempts):
+                return json.dumps(prompt_response)
+
+            self.service._call_gemini = fake_prompt_gemini
+            await self.service._create_prompt_pool(run_id, config, 2)
+            return self.service.get_run(run_id)
+
+        run = asyncio.run(exercise())
+        self.assertEqual(len(run["prompt_pool"]), 2)
+        self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
+
+    def test_generation_randomly_consumes_a_prompt_pool_entry(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Fresh", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "AI已拆分分类"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            db.execute(
+                "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
+                ("prompt-1", run_id, "trend-1", "POOL PROMPT ONLY", "ready", utc_now()),
+            )
+
+        async def exercise():
+            async def fake_flow(prompt, _model):
+                self.assertEqual(prompt, "POOL PROMPT ONLY")
+                return "ok", b"image", "image/png"
+
+            self.service._call_flow = fake_flow
+            await self.service._generate_from_prompt_pool(run_id, self.service.get_config(), 1)
 
         asyncio.run(exercise())
-        self.assertEqual(len(generated), 2)
+        run = self.service.get_run(run_id)
+        generation = run["trends"][0]["generations"][0]
+        self.assertEqual(generation["prompt_id"], "prompt-1")
+        self.assertEqual(generation["prompt"], "POOL PROMPT ONLY")
+        self.assertEqual(run["prompt_pool"][0]["used_count"], 1)
 
     def test_external_flow_image_download_does_not_receive_api_key(self):
         requests = []
@@ -173,11 +232,14 @@ class StaticPageTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
-    def test_manual_review_controls_are_present(self):
-        self.assertIn("获取热点并生成物品图", self.html)
-        self.assertIn("生成所选热点", self.html)
+    def test_separate_pipeline_controls_are_present(self):
+        self.assertIn("① 获取热点", self.html)
+        self.assertIn("② AI拆分分类", self.html)
+        self.assertIn("③ 随机生成提示词池", self.html)
+        self.assertIn("④ 随机提示词生图", self.html)
         self.assertIn("热点来源平台", self.html)
         self.assertIn("优先地区（全球搜索", self.html)
+        self.assertNotIn("生成所选热点", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)
