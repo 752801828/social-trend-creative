@@ -63,6 +63,14 @@ async def index():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+@app.get("/acquire")
+@app.get("/trends")
+@app.get("/prompts")
+@app.get("/images")
+async def module_page():
+    return FileResponse(ROOT / "static" / "index.html")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "social-trend-creative"}

@@ -941,7 +941,10 @@ Requirements:
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (min(200, max(1, limit)),)
+                """SELECT r.*,
+                          (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count
+                   FROM runs r ORDER BY r.started_at DESC LIMIT ?""",
+                (min(200, max(1, limit)),),
             ).fetchall()
         return [dict(row) for row in rows]
 

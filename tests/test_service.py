@@ -130,11 +130,12 @@ class TrendServiceTests(unittest.TestCase):
 
             self.service._call_gemini = fake_prompt_gemini
             await self.service._create_prompt_pool(run_id, config, 2)
-            return self.service.get_run(run_id)
+            return self.service.get_run(run_id), self.service.list_runs()
 
-        run = asyncio.run(exercise())
+        run, runs = asyncio.run(exercise())
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
+        self.assertEqual(runs[0]["prompt_count"], 2)
 
     def test_generation_randomly_consumes_a_prompt_pool_entry(self):
         run_id = self.service.create_run("manual")
@@ -240,6 +241,22 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("热点来源平台", self.html)
         self.assertIn("优先地区（全球搜索", self.html)
         self.assertNotIn("生成所选热点", self.html)
+
+    def test_each_pool_has_a_clickable_module_page(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        for path, label in (
+            ("/acquire", "原始热点"),
+            ("/trends", "热点池"),
+            ("/prompts", "提示词池"),
+            ("/images", "生图池"),
+        ):
+            self.assertIn(f'@app.get("{path}")', main)
+            self.assertIn(f'href="{path}"', self.html)
+            self.assertIn(label, self.html)
+        self.assertIn('id="moduleRuns"', self.html)
+        self.assertIn('id="moduleContent"', self.html)
+        self.assertIn("renderModuleContent", self.html)
+        self.assertIn("safeHttpUrl", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)
