@@ -33,7 +33,7 @@ git log -5 --oneline
 
 1. 热点获取：Gemini 在配置数量内获取全球所有类型原始社媒热点，不按产品适配、视觉潜力、品牌、人物或敏感类型过滤；仅事实化记录并标记风险。
 2. 图案提取：从原始热点提取安全、原创、可复用、与产品无关的视觉图案方向，写入可用图案池 `trends`；一个热点可以产生零个、一个或多个图案。
-3. 提示词生成：随机抽取可用图案池条目，为每条选择产品并生成完整效果图提示词，追加到 `prompt_pool`。
+3. 提示词生成：为同一轮次全部尚未处理的可用图案逐条生成对应产品效果图提示词，写入 `prompt_pool`；不随机抽样、不重复已有图案。
 4. 生图：随机抽取 `prompt_pool` 条目交给 Flow，把图案直接生成在产品上，图片记录保存对应 `prompt_id`。
 
 核心关系为：
@@ -42,7 +42,7 @@ git log -5 --oneline
 Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 ```
 
-生图不能绕过提示词池直接消费原始热点或可用图案。提示词池条目可以重复使用，`used_count` 记录使用次数。同一轮次可重复追加提示词；已形成可用图案池后禁止重新提取，因为替换该池会级联影响现有提示词和图片。
+点击“获取热点”会在同一轮次依次完成前三阶段。只有第四阶段随机抽取；提示词池条目可以重复用于多次生图，`used_count` 记录使用次数。已形成可用图案池后禁止重新提取，因为替换该池会级联影响现有提示词和图片。
 
 ## 业务边界
 
@@ -64,19 +64,20 @@ Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 - `completed` / `partial` / `failed` / `cancelled`：生图或阶段最终结果。
 - `ready`：可用图案池或提示词池条目可用。
 - 任一时刻只允许一个阶段任务运行，冲突返回 HTTP `409`。
-- 手动“一键完整流水线”固定运行四阶段。
-- 定时任务固定运行前三阶段；仅在 `auto_generate=true` 时继续随机生图。
+- 手动“获取热点”固定运行前三阶段，“一键完整流水线”固定运行四阶段。
+- 热点获取和随机生图拥有独立每日时间；`enabled` 控制前三阶段任务，`auto_generate` 控制定时随机生图。
 - 调度和定时自动生图默认均关闭。
 
 ## 当前默认策略
 
-- 每日时间：`09:00`
+- 每日热点获取时间：`09:00`
+- 每日随机生图时间：`10:00`
 - 时区：`Asia/Shanghai`
 - 回溯窗口：24 小时
 - 地区：美国、英国、欧洲、全球英语区（优先覆盖）
 - 来源平台：X、TikTok、Instagram、YouTube、Reddit
-- 全类型原始热点数 / 默认随机图案数：10
-- 每轮随机生图数：1（内部兼容字段仍名为 `images_per_trend`）
+- 全类型原始热点数：10
+- 每轮随机生图数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
 - Gemini 获取模型：`gemini-pro-thinking`
 - Gemini 分类/提示词模型：`gemini-flash`
 - Flow 默认模型：`gemini-3.1-flash-image-landscape`
@@ -106,9 +107,9 @@ Authorization: Bearer <ADMIN_KEY>
 - `GET /api/state`
 - `PUT /api/config`
 - `POST /api/connections/test`
-- `POST /api/runs/discover`：①获取
+- `POST /api/runs/discover`：①②③同一轮次顺序执行
 - `POST /api/runs/{run_id}/classify`：②拆分分类
-- `POST /api/runs/{run_id}/prompts`：③随机热点生成提示词池，JSON 为 `{}` 或 `{"count":5}`
+- `POST /api/runs/{run_id}/prompts`：③为全部未处理图案补齐提示词；旧 `count` 参数保留兼容但不参与抽样
 - `POST /api/runs/{run_id}/generate`：④随机提示词生图，JSON 为 `{}` 或 `{"count":3}`
 - `POST /api/runs/full`：①②③④完整流水线
 - `GET /api/runs/{run_id}`
@@ -118,14 +119,13 @@ Authorization: Bearer <ADMIN_KEY>
 ## 管理页面
 
 - `/`：全局总览、统计、连接、设置和一键完整流水线。
-- `/acquire`：全部热点模块，可查看配置数量内的全类型原始热点并启动新获取。
-- `/trends`：可用图案池模块，可查看提取结果并对只有原始热点的轮次执行图案提取。
-- `/prompts`：提示词池模块，可查看提示词全文、使用次数，并对已有可用图案的轮次追加随机提示词。
-- `/images`：生图池模块，可查看和放大成品，并从已有提示词池随机生图。
+- `/acquire`、`/trends`、`/prompts`、`/images` 均直接展示跨任务内容卡片，按内容日期倒序排列，无需先选轮次。
+- 点击任意内容卡片打开所属任务详情；图片本身仍可单独点击放大。
+- 任务详情可补齐中断的图案或提示词阶段，并可为随机生图手动指定 1–30 张。
 
-这些是独立 URL 和独立模块界面，但由同一份 `static/index.html` 原生路由视图实现，避免重复前端代码。轮次列表 API 会附带 `prompt_count` 供模块筛选和计数。
+这些是独立 URL 和独立模块界面，但由同一份 `static/index.html` 原生路由视图实现，避免重复前端代码。页面通过现有任务详情 API 汇总内容卡片，不新增前端框架。
 
-视觉规范来自 2026-08-14 提供的 StyleKit `Japanese Fresh（日系清新风）` 设计包：`#fafaf8` 米白背景、`#64b5f6` 天空蓝、`#98d8c8` 薄荷绿、`#ffb7c5` 樱花粉、`#d4d4cf` 暖灰发丝线；标题使用 Yeseva One，正文使用 Karla，保留本地系统字体回退。后续 UI 修改应继续使用大留白、圆角、轻量慢动效和植物线稿，不恢复黑红粗边框风格。
+视觉规范沿用 StyleKit `Japanese Fresh（日系清新风）`，背景调整为 `#e8eee8` 灰绿色纸张，卡片使用 `#fffdf6` 暖白色，并提高文字、边框和阴影对比度；标题继续使用 Yeseva One，正文使用 Karla。
 
 ## 数据与迁移
 
@@ -184,9 +184,9 @@ curl http://localhost:5920/health
 
 - 四阶段后端服务、独立接口和一键完整流水线已完成。
 - 全类型原始热点、可用图案池、提示词池和生成记录已分开持久化。
-- 随机图案生成提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
+- 全量图案对应提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
 - 管理页已拆成总览和四个独立 URL 模块，可按轮次查看全部热点、可用图案池、提示词池和生图池；整体使用 StyleKit 日系清新风。
 - 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
-- 当前测试共 16 项。
+- 当前测试共 18 项。
 
 新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。

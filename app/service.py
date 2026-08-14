@@ -53,12 +53,13 @@ FLOW_MODELS = [
 DEFAULT_CONFIG = {
     "enabled": False,
     "schedule_time": "09:00",
+    "generation_schedule_time": "10:00",
     "timezone": "Asia/Shanghai",
     "lookback_hours": 24,
     "regions": ["United States", "United Kingdom", "Europe", "Global English"],
     "platforms": ["X", "TikTok", "Instagram", "YouTube", "Reddit"],
     "candidate_count": 10,
-    "images_per_trend": 1,
+    "images_per_trend": 5,
     "gemini_discovery_model": "gemini-pro-thinking",
     "gemini_verification_model": "gemini-flash",
     "flow_models": ["gemini-3.1-flash-image-landscape"],
@@ -127,6 +128,7 @@ class TrendService:
         self.scheduler_task: asyncio.Task | None = None
         self._stopping = False
         self._last_scheduled_date = ""
+        self._last_generation_date = ""
         self._init_db()
 
     @contextmanager
@@ -239,18 +241,23 @@ class TrendService:
     def get_config(self) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT value FROM settings WHERE id = 1").fetchone()
-        config = {**copy.deepcopy(DEFAULT_CONFIG), **json.loads(row["value"])}
+        stored = json.loads(row["value"])
+        config = {**copy.deepcopy(DEFAULT_CONFIG), **stored}
+        if "generation_schedule_time" not in stored:
+            config["images_per_trend"] = max(5, int(config["images_per_trend"]))
         config.pop("final_count", None)
         return config
 
     def save_config(self, values: dict[str, Any]) -> dict[str, Any]:
         config = {**self.get_config(), **values}
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(config["schedule_time"])):
-            raise ValueError("执行时间必须使用HH:MM格式")
+            raise ValueError("热点获取时间必须使用HH:MM格式")
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(config["generation_schedule_time"])):
+            raise ValueError("生图时间必须使用HH:MM格式")
         ZoneInfo(str(config["timezone"]))
         config["lookback_hours"] = min(168, max(1, int(config["lookback_hours"])))
         config["candidate_count"] = min(30, max(1, int(config["candidate_count"])))
-        config["images_per_trend"] = min(5, max(1, int(config["images_per_trend"])))
+        config["images_per_trend"] = min(30, max(1, int(config["images_per_trend"])))
         config["generation_concurrency"] = min(5, max(1, int(config["generation_concurrency"])))
         config["regions"] = [str(item).strip() for item in config.get("regions", []) if str(item).strip()][:20]
         config["platforms"] = [str(item).strip() for item in config.get("platforms", []) if str(item).strip()][:20]
@@ -343,10 +350,14 @@ class TrendService:
     def launch_prompt_pool(self, run_id: str, count: int | None = None) -> bool:
         with self._connect() as db:
             exists = db.execute(
-                "SELECT 1 FROM trends WHERE run_id=? AND status!='rejected' LIMIT 1", (run_id,)
+                """SELECT 1 FROM trends t
+                   WHERE t.run_id=? AND t.status!='rejected'
+                     AND NOT EXISTS (SELECT 1 FROM prompt_pool p WHERE p.trend_id=t.id)
+                   LIMIT 1""",
+                (run_id,),
             ).fetchone()
         if not exists:
-            raise ValueError("可用图案池为空，请先提取可用图案")
+            raise ValueError("没有待生成提示词的可用图案")
         return self._launch(run_id, self._run_stage(run_id, "prompt_pool", count), f"prompts-{run_id}")
 
     def launch_generation(self, run_id: str, count: int | None = None) -> bool:
@@ -464,17 +475,17 @@ class TrendService:
     ) -> list[str]:
         with self._connect() as db:
             trends = [dict(row) for row in db.execute(
-                "SELECT * FROM trends WHERE run_id=? AND status!='rejected'", (run_id,)
+                """SELECT t.* FROM trends t
+                   WHERE t.run_id=? AND t.status!='rejected'
+                     AND NOT EXISTS (SELECT 1 FROM prompt_pool p WHERE p.trend_id=t.id)
+                   ORDER BY t.rank""",
+                (run_id,),
             ).fetchall()]
         if not trends:
-            raise ValueError("可用图案池为空，请先提取可用图案")
-        selected = random.sample(
-            trends,
-            min(len(trends), max(1, count or config["candidate_count"])),
-        )
+            raise ValueError("没有待生成提示词的可用图案")
         self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
         response_text = await self._call_gemini(
-            self._prompt_pool_prompt(selected), config["gemini_verification_model"], attempts=2
+            self._prompt_pool_prompt(trends), config["gemini_verification_model"], attempts=2
         )
         payload = extract_json_object(response_text)
         supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
@@ -484,7 +495,7 @@ class TrendService:
         }
         prompt_ids = []
         with self._connect() as db:
-            for trend in selected:
+            for trend in trends:
                 prompt_id = secrets.token_hex(12)
                 prompt = supplied_map.get(trend["id"]) or self._flow_prompt(trend)
                 db.execute(
@@ -777,7 +788,7 @@ Schema:
             }
             for item in trends
         ]
-        return f"""You create production-ready image prompts from randomly selected pattern-pool entries extracted from worldwide social trends.
+        return f"""You create production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
 For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Keep the safe pattern direction and category, select one suitable physical item, and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting. The final image must show the pattern already printed directly on the product, never as separate flat artwork.
 
@@ -786,7 +797,7 @@ Rules:
 2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
 3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
-5. Return strict JSON only and preserve every trend_id exactly.
+5. Return exactly one prompt for every supplied trend_id, preserve every trend_id exactly, and return strict JSON only.
 
 Pattern-pool entries:
 {json.dumps(compact, ensure_ascii=False)}
@@ -1033,16 +1044,33 @@ Requirements:
         while not self._stopping:
             try:
                 config = self.get_config()
+                local = datetime.now(ZoneInfo(config["timezone"]))
+                date_key = local.date().isoformat()
+                current_time = local.strftime("%H:%M")
                 if config.get("enabled"):
-                    local = datetime.now(ZoneInfo(config["timezone"]))
-                    date_key = local.date().isoformat()
-                    if local.strftime("%H:%M") >= config["schedule_time"] and self._last_scheduled_date != date_key:
+                    if current_time >= config["schedule_time"] and self._last_scheduled_date != date_key:
                         run_id = self.launch_full_pipeline(
                             trigger_type="scheduled",
-                            auto_generate=bool(config.get("auto_generate")),
+                            auto_generate=False,
                         )
                         if run_id:
                             self._last_scheduled_date = date_key
+                if (
+                    config.get("auto_generate")
+                    and current_time >= config["generation_schedule_time"]
+                    and self._last_generation_date != date_key
+                ):
+                    with self._connect() as db:
+                        latest = db.execute(
+                            """SELECT r.id FROM runs r
+                               WHERE EXISTS (
+                                 SELECT 1 FROM prompt_pool p
+                                 WHERE p.run_id=r.id AND p.status='ready'
+                               )
+                               ORDER BY r.started_at DESC LIMIT 1"""
+                        ).fetchone()
+                    if latest and self.launch_generation(latest["id"]):
+                        self._last_generation_date = date_key
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 raise

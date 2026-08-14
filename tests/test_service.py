@@ -76,7 +76,8 @@ class TrendServiceTests(unittest.TestCase):
         trend = self._candidate("candidate-1", "Trend", "", None)
         trend.update({"id": "trend-1"})
         pool_prompt = self.service._prompt_pool_prompt([trend])
-        self.assertIn("randomly selected pattern-pool entries", pool_prompt)
+        self.assertIn("every supplied pattern-pool entry", pool_prompt)
+        self.assertIn("exactly one prompt for every supplied trend_id", pool_prompt)
         self.assertIn("printed directly on the product", pool_prompt)
         self.assertIn("vehicle spare-tire cover", pool_prompt)
         flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
@@ -94,6 +95,8 @@ class TrendServiceTests(unittest.TestCase):
         config = self.service.get_config()
         self.assertFalse(config["enabled"])
         self.assertFalse(config["auto_generate"])
+        self.assertEqual(config["generation_schedule_time"], "10:00")
+        self.assertEqual(config["images_per_trend"], 5)
         self.assertNotIn("final_count", config)
 
     def test_pipeline_builds_separate_trend_and_prompt_pools_before_generation(self):
@@ -136,7 +139,9 @@ class TrendServiceTests(unittest.TestCase):
                 return json.dumps(prompt_response)
 
             self.service._call_gemini = fake_prompt_gemini
-            await self.service._create_prompt_pool(run_id, config, 2)
+            await self.service._create_prompt_pool(run_id, config, 1)
+            with self.assertRaisesRegex(ValueError, "没有待生成提示词"):
+                await self.service._create_prompt_pool(run_id, config, 1)
             return self.service.get_run(run_id), self.service.list_runs()
 
         run, runs = asyncio.run(exercise())
@@ -195,6 +200,36 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(generation["prompt_id"], "prompt-1")
         self.assertEqual(generation["prompt"], "POOL PROMPT ONLY")
         self.assertEqual(run["prompt_pool"][0]["used_count"], 1)
+
+    def test_generation_schedule_runs_without_acquisition_schedule(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Fresh", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "AI已提取可用图案"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            db.execute(
+                "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
+                ("prompt-1", run_id, "trend-1", "POOL PROMPT", "ready", utc_now()),
+            )
+        self.service.save_config(
+            {"enabled": False, "auto_generate": True, "generation_schedule_time": "00:00"}
+        )
+
+        async def exercise():
+            launched = []
+            self.service.launch_generation = lambda selected_run_id: launched.append(selected_run_id) or True
+            task = asyncio.create_task(self.service._scheduler_loop())
+            for _ in range(100):
+                if launched:
+                    break
+                await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return launched
+
+        self.assertEqual(asyncio.run(exercise()), [run_id])
 
     def test_external_flow_image_download_does_not_receive_api_key(self):
         requests = []
@@ -266,10 +301,13 @@ class StaticPageTests(unittest.TestCase):
         cls.html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
     def test_separate_pipeline_controls_are_present(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn("① 获取热点", self.html)
         self.assertIn("② 提取可用图案", self.html)
-        self.assertIn("③ 随机生成提示词池", self.html)
-        self.assertIn("④ 随机提示词产品生图", self.html)
+        self.assertIn("③ 补齐全部提示词", self.html)
+        self.assertIn("④ 随机产品生图", self.html)
+        self.assertIn("获取全部热点，并在同一任务中依次建立可用图案池和提示词池", self.html)
+        self.assertIn('launch_full_pipeline(trigger_type="manual", auto_generate=False)', main)
         self.assertIn("热点来源平台", self.html)
         self.assertIn("优先地区（全球搜索", self.html)
         self.assertNotIn("生成所选热点", self.html)
@@ -285,18 +323,27 @@ class StaticPageTests(unittest.TestCase):
             self.assertIn(f'@app.get("{path}")', main)
             self.assertIn(f'href="{path}"', self.html)
             self.assertIn(label, self.html)
-        self.assertIn('id="moduleRuns"', self.html)
         self.assertIn('id="moduleContent"', self.html)
         self.assertIn("renderModuleContent", self.html)
+        self.assertIn("moduleEntries", self.html)
+        self.assertIn("new Date(b.date)-new Date(a.date)", self.html)
+        self.assertIn("cardAttrs", self.html)
         self.assertIn("safeHttpUrl", self.html)
         self.assertIn("风险标记：", self.html)
 
     def test_stylekit_japanese_fresh_theme_is_applied(self):
         self.assertIn("Japanese Fresh", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
-        self.assertIn("#fafaf8", self.html)
+        self.assertIn("#e8eee8", self.html)
         self.assertIn("Yeseva One", self.html)
         self.assertIn('class="botanical"', self.html)
         self.assertIn("prefers-reduced-motion", self.html)
+        self.assertIn("box-shadow:var(--shadow)", self.html)
+
+    def test_acquisition_and_generation_have_separate_schedule_controls(self):
+        self.assertIn('id="cfgTime"', self.html)
+        self.assertIn('id="cfgGenerationTime"', self.html)
+        self.assertIn("generation_schedule_time", self.html)
+        self.assertIn("每轮随机生图数（1–30）", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)
