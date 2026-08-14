@@ -5,19 +5,19 @@ The project turns worldwide social signals into categorized creative inputs, reu
 ## Language
 
 **Pipeline run**:
-One pass through acquisition, trend-pool formation, prompt-pool formation, and optional image generation.
+One pass through inclusive trend acquisition, pattern-pool extraction, prompt-pool formation, and optional image generation.
 _Avoid_: Trend run, discovery run
 
 **Raw trend**:
-An unclassified social signal returned by worldwide acquisition before AI splitting and categorization.
+Any factual social signal returned by worldwide acquisition before commercial or visual suitability is considered; protected, sensitive, and non-visual topics remain present with risk markers.
 _Avoid_: Verified trend
 
-**Trend-pool entry**:
-An independently usable, AI-split and categorized creative angle derived from one or more raw trends.
-_Avoid_: Candidate, topic
+**Pattern-pool entry**:
+An original, production-safe, product-independent visual direction extracted from a raw trend; one raw trend may yield zero, one, or multiple entries.
+_Avoid_: Trend-pool entry, candidate, topic
 
 **Prompt-pool entry**:
-A concrete product-rendering prompt derived from a randomly selected trend-pool entry; image generation consumes this entry, never a trend directly.
+A concrete product-rendering prompt derived from a randomly selected pattern-pool entry; image generation consumes this entry, never a raw trend directly.
 _Avoid_: Visual brief
 
 **Generation task**:

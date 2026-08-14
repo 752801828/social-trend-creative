@@ -337,7 +337,7 @@ class TrendService:
         with self._connect() as db:
             exists = db.execute("SELECT 1 FROM trends WHERE run_id=? LIMIT 1", (run_id,)).fetchone()
         if exists:
-            raise ValueError("热点池已存在；重新分类会破坏已有提示词和图片")
+            raise ValueError("可用图案池已存在；重新提取会破坏已有提示词和图片")
         return self._launch(run_id, self._run_stage(run_id, "classification"), f"classify-{run_id}")
 
     def launch_prompt_pool(self, run_id: str, count: int | None = None) -> bool:
@@ -346,7 +346,7 @@ class TrendService:
                 "SELECT 1 FROM trends WHERE run_id=? AND status!='rejected' LIMIT 1", (run_id,)
             ).fetchone()
         if not exists:
-            raise ValueError("热点池为空，请先执行AI拆分分类")
+            raise ValueError("可用图案池为空，请先提取可用图案")
         return self._launch(run_id, self._run_stage(run_id, "prompt_pool", count), f"prompts-{run_id}")
 
     def launch_generation(self, run_id: str, count: int | None = None) -> bool:
@@ -438,13 +438,12 @@ class TrendService:
             attempts=2,
         )
         payload = extract_json_object(verification_text)
-        if isinstance(payload.get("classified_trends"), list):
-            trends = self._normalise_candidates(
-                {"trends": payload["classified_trends"]}, config["candidate_count"] * 3
-            )
-            trends = self._trend_pool_entries(trends)
-        else:
-            trends = self._verify_candidates(config, candidates, payload)
+        if not isinstance(payload.get("classified_trends"), list):
+            raise ValueError("Gemini没有返回可解析的可用图案池")
+        trends = self._normalise_candidates(
+            {"trends": payload["classified_trends"]}, config["candidate_count"] * 3
+        )
+        trends = self._trend_pool_entries(trends)
         self._replace_trends(run_id, trends)
         usable = [item for item in trends if item["status"] == "ready"]
         self._update_run(
@@ -453,7 +452,7 @@ class TrendService:
             verified_count=len(usable),
             status="trend_pool_ready" if usable else "failed",
             stage="trend_pool" if usable else "finished",
-            error="" if usable else "热点池为空",
+            error="" if usable else "可用图案池为空",
         )
         return usable
 
@@ -468,7 +467,7 @@ class TrendService:
                 "SELECT * FROM trends WHERE run_id=? AND status!='rejected'", (run_id,)
             ).fetchall()]
         if not trends:
-            raise ValueError("热点池为空，请先执行AI拆分分类")
+            raise ValueError("可用图案池为空，请先提取可用图案")
         selected = random.sample(
             trends,
             min(len(trends), max(1, count or config["candidate_count"])),
@@ -685,7 +684,7 @@ class TrendService:
 
     def _discovery_prompt(self, config: dict[str, Any]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are a real-time worldwide social-media visual-trend researcher for print-on-demand products.
+        return f"""You are a real-time worldwide social-media trend collector.
 
 Current time: {now}
 Lookback window: the previous {config['lookback_hours']} hours
@@ -693,15 +692,15 @@ Target regions: {', '.join(config['regions'])}
 Target platforms: {', '.join(config['platforms'])}
 Return at most {config['candidate_count']} candidate trends.
 
-You must use any internet-search capability available in the current Gemini session. Search worldwide; treat the target regions as priority coverage rather than exclusive boundaries. Collect broad raw trends: current events, memes, phrases, moods, aesthetics, communities, seasonal moments, and visual symbols. Do not choose products or write image prompts in this acquisition stage.
+You must use any internet-search capability available in the current Gemini session. Search worldwide; treat the target regions as priority coverage rather than exclusive boundaries. Within the configured result count, collect the strongest current trends across every category: news, politics, public figures, entertainment, brands, sports, business, technology, science, emergencies, controversies, memes, phrases, moods, aesthetics, communities, seasonal moments, and niche subcultures. This stage is an inclusive raw-trend inventory, not a product or design filter.
 
 Rules:
-1. Each result is a raw social signal. Keep separate movements separate, but do not turn one signal into product concepts yet.
-2. Evidence URLs and publication times are optional. Include real sources when available, but never invent them and never omit a useful visual opportunity only because evidence is unavailable.
-3. Use null when a value cannot be verified.
-4. Reject gambling, adult content, graphic violence, obvious misinformation, hate, trademarks, copyrighted characters, and ideas dependent on a real person's likeness.
-5. Prefer signals with recognizable shapes, color moods, symbols, textures, communities, or emotional hooks that can be analyzed later without copying an existing post or artwork.
-6. Return strict JSON only. Do not use Markdown fences or prose outside JSON.
+1. Each result is a factual raw social signal. Keep separate movements separate and do not turn any signal into a product concept, printable pattern, or image prompt yet.
+2. Do not filter by product suitability or visual potential. Do not reject or omit a trend merely because it involves a brand, copyrighted subject, public figure, politics, controversy, sensitive material, misinformation risk, adult discussion, gambling, hate, or violence. Record sensitive topics at a high factual level without graphic detail and identify concerns in risk_flags for the next stage.
+3. Evidence URLs and publication times are optional. Include real sources when available, never invent them, and never omit a trend only because evidence is unavailable.
+4. Use null when a value cannot be verified. Distinguish verified facts from unverified claims in the summary and risk flags.
+5. Seek broad category coverage and strong current attention rather than only visually attractive or commercially usable trends.
+6. Return strict JSON only. Do not use Markdown fences or prose outside JSON. Put every returned trend in the trends array; do not return a rejected list.
 
 Schema:
 {{
@@ -722,21 +721,24 @@ Schema:
         {{"source_type":"platform","platform":"X","title":"Source title","url":"https://...","published_at":"ISO-8601 or null"}}
       ],
       "confidence": 0.85,
-      "visual_brief_en": "Optional raw visual observation, not an image prompt",
-      "risk_flags": []
+      "visual_brief_en": "Optional observable symbols or mood; empty is allowed and this is not an image prompt",
+      "risk_flags": ["optional: ip|public_figure|sensitive|unsafe|misinformation_risk|other"]
     }}
-  ],
-  "rejected": [{{"topic":"topic","reason":"reason"}}]
+  ]
 }}"""
 
     def _classification_prompt(self, config: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
         now = datetime.now(ZoneInfo(config["timezone"])).isoformat()
-        return f"""You are the AI classifier that builds a reusable worldwide trend pool.
+        return f"""You are the creative-pattern extractor that builds a reusable, production-safe pattern pool from an inclusive raw social-trend inventory.
 
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Split broad raw trends into independently usable creative angles, merge duplicates, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood. A raw trend may produce multiple classified entries when it contains distinct visual angles. Each entry must preserve factual context and include a reusable visual direction, but it must not be a finished image prompt or choose a physical product yet. Missing evidence or publication time is not a rejection reason. Exclude only empty, unsafe, trademark-dependent, copyrighted-character-dependent, or real-person-likeness-dependent angles. Return strict JSON only.
+Extract only original, reusable, production-safe visual pattern directions from the raw trends. A raw trend may produce zero, one, or multiple pattern entries. Split distinct motifs, merge duplicate directions, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood.
+
+The acquisition input intentionally includes every trend type. Do not copy or retain logos, trademarks, copyrighted characters, distinctive existing artwork, public-figure likenesses, hate symbols, explicit/adult imagery, graphic violence, misinformation claims, or unsafe instructions. When a protected or sensitive trend has a meaningful generic underlying mood, shape language, color story, community feeling, or visual metaphor, extract only that non-infringing generic direction without implying endorsement or association; otherwise output no pattern for it. Missing evidence or publication time is not itself a rejection reason.
+
+Every classified_trends item is an accepted pattern-pool entry. It must preserve enough factual context to explain the inspiration, contain a concrete reusable visual motif and mood, have no unresolved risk flags, and remain independent of any physical product. Do not write the final image prompt or choose a product in this stage. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -745,8 +747,8 @@ Schema:
 {{
   "classified_trends": [
     {{
-      "topic_en":"independent English angle",
-      "topic_zh":"独立中文角度",
+      "topic_en":"independent safe pattern direction",
+      "topic_zh":"独立可用图案方向",
       "summary_zh":"事实摘要",
       "why_trending":"传播原因",
       "platforms":["X"],
@@ -756,7 +758,7 @@ Schema:
       "engagement_signal":"signal or null",
       "evidence":[],
       "confidence":0.8,
-      "visual_brief_en":"Reusable visual motif and mood, not a finished prompt",
+      "visual_brief_en":"Concrete original visual motif, composition, palette, texture, and mood; not a finished prompt and no product",
       "risk_flags":[]
     }}
   ]
@@ -775,9 +777,9 @@ Schema:
             }
             for item in trends
         ]
-        return f"""You create production-ready image prompts from randomly selected worldwide trend-pool entries.
+        return f"""You create production-ready image prompts from randomly selected pattern-pool entries extracted from worldwide social trends.
 
-For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Keep the trend's original idea and category, select one suitable physical item, and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting.
+For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Keep the safe pattern direction and category, select one suitable physical item, and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting. The final image must show the pattern already printed directly on the product, never as separate flat artwork.
 
 Rules:
 1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
@@ -786,7 +788,7 @@ Rules:
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
 5. Return strict JSON only and preserve every trend_id exactly.
 
-Trend-pool entries:
+Pattern-pool entries:
 {json.dumps(compact, ensure_ascii=False)}
 
 Schema:
@@ -888,7 +890,7 @@ Schema:
             item.pop("candidate_id", None)
             item["id"] = secrets.token_hex(12)
             item["status"] = "ready"
-            item["verification_note"] = "AI已拆分分类"
+            item["verification_note"] = "AI已提取可用图案并分类"
             output.append(item)
         return output
 

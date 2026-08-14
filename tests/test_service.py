@@ -57,7 +57,11 @@ class TrendServiceTests(unittest.TestCase):
         prompt = self.service._discovery_prompt(self.service.get_config())
         self.assertIn("worldwide social-media", prompt)
         self.assertIn("priority coverage rather than exclusive boundaries", prompt)
-        self.assertIn("Do not choose products or write image prompts", prompt)
+        self.assertIn("across every category", prompt)
+        self.assertIn("Do not filter by product suitability", prompt)
+        self.assertIn("Do not reject or omit a trend merely because", prompt)
+        self.assertIn("risk_flags", prompt)
+        self.assertNotIn('"rejected":', prompt)
         self.assertIn("Evidence URLs and publication times are optional", prompt)
         self.assertIn("strict JSON", prompt)
         self.assertIn("TikTok", prompt)
@@ -65,12 +69,15 @@ class TrendServiceTests(unittest.TestCase):
         classify_prompt = self.service._classification_prompt(
             self.service.get_config(), [self._candidate("candidate-1", "Trend", "", None)]
         )
-        self.assertIn("Split broad raw trends", classify_prompt)
+        self.assertIn("creative-pattern extractor", classify_prompt)
+        self.assertIn("zero, one, or multiple pattern entries", classify_prompt)
         self.assertIn("classified_trends", classify_prompt)
+        self.assertIn("no unresolved risk flags", classify_prompt)
         trend = self._candidate("candidate-1", "Trend", "", None)
         trend.update({"id": "trend-1"})
         pool_prompt = self.service._prompt_pool_prompt([trend])
-        self.assertIn("randomly selected worldwide trend-pool entries", pool_prompt)
+        self.assertIn("randomly selected pattern-pool entries", pool_prompt)
+        self.assertIn("printed directly on the product", pool_prompt)
         self.assertIn("vehicle spare-tire cover", pool_prompt)
         flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
         self.assertIn("printed directly on the single physical product", flow_prompt)
@@ -136,6 +143,31 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
         self.assertEqual(runs[0]["prompt_count"], 2)
+
+    def test_invalid_classification_schema_never_promotes_raw_trends(self):
+        run_id = self.service.create_run("manual")
+        discovery = {
+            "trends": [
+                {
+                    "topic_en": "Protected raw topic",
+                    "topic_zh": "受保护的原始热点",
+                    "summary_zh": "仅用于验证流程边界",
+                    "risk_flags": ["ip", "public_figure"],
+                }
+            ]
+        }
+        self.service._update_run(run_id, raw_discovery=json.dumps(discovery), candidate_count=1)
+
+        async def exercise():
+            async def fake_gemini(_prompt, _model, *, attempts):
+                return json.dumps({"verified_trends": discovery["trends"]})
+
+            self.service._call_gemini = fake_gemini
+            with self.assertRaisesRegex(ValueError, "可用图案池"):
+                await self.service._classify_trend_pool(run_id, self.service.get_config())
+
+        asyncio.run(exercise())
+        self.assertEqual(self.service.get_run(run_id)["trends"], [])
 
     def test_generation_randomly_consumes_a_prompt_pool_entry(self):
         run_id = self.service.create_run("manual")
@@ -235,9 +267,9 @@ class StaticPageTests(unittest.TestCase):
 
     def test_separate_pipeline_controls_are_present(self):
         self.assertIn("① 获取热点", self.html)
-        self.assertIn("② AI拆分分类", self.html)
+        self.assertIn("② 提取可用图案", self.html)
         self.assertIn("③ 随机生成提示词池", self.html)
-        self.assertIn("④ 随机提示词生图", self.html)
+        self.assertIn("④ 随机提示词产品生图", self.html)
         self.assertIn("热点来源平台", self.html)
         self.assertIn("优先地区（全球搜索", self.html)
         self.assertNotIn("生成所选热点", self.html)
@@ -245,8 +277,8 @@ class StaticPageTests(unittest.TestCase):
     def test_each_pool_has_a_clickable_module_page(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         for path, label in (
-            ("/acquire", "原始热点"),
-            ("/trends", "热点池"),
+            ("/acquire", "全部热点"),
+            ("/trends", "可用图案池"),
             ("/prompts", "提示词池"),
             ("/images", "生图池"),
         ):
@@ -257,6 +289,14 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('id="moduleContent"', self.html)
         self.assertIn("renderModuleContent", self.html)
         self.assertIn("safeHttpUrl", self.html)
+        self.assertIn("风险标记：", self.html)
+
+    def test_stylekit_japanese_fresh_theme_is_applied(self):
+        self.assertIn("Japanese Fresh", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("#fafaf8", self.html)
+        self.assertIn("Yeseva One", self.html)
+        self.assertIn('class="botanical"', self.html)
+        self.assertIn("prefers-reduced-motion", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)
