@@ -90,6 +90,15 @@ def string_list(value: Any, *, limit: int, item_limit: int) -> list[str]:
     return [str(item).strip()[:item_limit] for item in value if str(item).strip()][:limit]
 
 
+def normalise_schedule_times(value: Any, label: str) -> str:
+    times = list(dict.fromkeys(item for item in re.split(r"[,，\s]+", str(value or "")) if item))
+    if not times or len(times) > 24 or any(
+        not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", item) for item in times
+    ):
+        raise ValueError(f"{label}必须使用HH:MM格式，多个时间用逗号分隔，最多24个")
+    return ",".join(times)
+
+
 def safe_error(exc: Exception) -> str:
     return re.sub(r"(?i)(authorization|api[_-]?key|bearer)\s*[:=]?\s*\S+", r"\1=***", str(exc))[:1000]
 
@@ -127,8 +136,9 @@ class TrendService:
         self.active_run_id: str | None = None
         self.scheduler_task: asyncio.Task | None = None
         self._stopping = False
-        self._last_scheduled_date = ""
-        self._last_generation_date = ""
+        self._scheduled_slots: set[str] = set()
+        self._generation_slots: set[str] = set()
+        self._scheduler_date = ""
         self._init_db()
 
     @contextmanager
@@ -250,10 +260,10 @@ class TrendService:
 
     def save_config(self, values: dict[str, Any]) -> dict[str, Any]:
         config = {**self.get_config(), **values}
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(config["schedule_time"])):
-            raise ValueError("热点获取时间必须使用HH:MM格式")
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(config["generation_schedule_time"])):
-            raise ValueError("生图时间必须使用HH:MM格式")
+        config["schedule_time"] = normalise_schedule_times(config["schedule_time"], "热点获取时间")
+        config["generation_schedule_time"] = normalise_schedule_times(
+            config["generation_schedule_time"], "生图时间"
+        )
         ZoneInfo(str(config["timezone"]))
         config["lookback_hours"] = min(168, max(1, int(config["lookback_hours"])))
         config["candidate_count"] = min(30, max(1, int(config["candidate_count"])))
@@ -1047,19 +1057,29 @@ Requirements:
                 local = datetime.now(ZoneInfo(config["timezone"]))
                 date_key = local.date().isoformat()
                 current_time = local.strftime("%H:%M")
+                acquisition_times = config["schedule_time"].split(",")
+                generation_times = config["generation_schedule_time"].split(",")
+                if self._scheduler_date != date_key:
+                    self._scheduler_date = date_key
+                    self._scheduled_slots = {f"{date_key}|{slot}" for slot in acquisition_times if slot < current_time}
+                    self._generation_slots = {f"{date_key}|{slot}" for slot in generation_times if slot < current_time}
                 if config.get("enabled"):
-                    if current_time >= config["schedule_time"] and self._last_scheduled_date != date_key:
+                    due = next(
+                        (slot for slot in acquisition_times if slot <= current_time and f"{date_key}|{slot}" not in self._scheduled_slots),
+                        None,
+                    )
+                    if due:
                         run_id = self.launch_full_pipeline(
                             trigger_type="scheduled",
                             auto_generate=False,
                         )
                         if run_id:
-                            self._last_scheduled_date = date_key
-                if (
-                    config.get("auto_generate")
-                    and current_time >= config["generation_schedule_time"]
-                    and self._last_generation_date != date_key
-                ):
+                            self._scheduled_slots.add(f"{date_key}|{due}")
+                due = next(
+                    (slot for slot in generation_times if slot <= current_time and f"{date_key}|{slot}" not in self._generation_slots),
+                    None,
+                )
+                if config.get("auto_generate") and due:
                     with self._connect() as db:
                         latest = db.execute(
                             """SELECT r.id FROM runs r
@@ -1070,7 +1090,7 @@ Requirements:
                                ORDER BY r.started_at DESC LIMIT 1"""
                         ).fetchone()
                     if latest and self.launch_generation(latest["id"]):
-                        self._last_generation_date = date_key
+                        self._generation_slots.add(f"{date_key}|{due}")
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 raise

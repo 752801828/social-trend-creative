@@ -3,7 +3,9 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -98,6 +100,18 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(config["generation_schedule_time"], "10:00")
         self.assertEqual(config["images_per_trend"], 5)
         self.assertNotIn("final_count", config)
+
+    def test_config_accepts_multiple_daily_schedule_times(self):
+        config = self.service.save_config(
+            {
+                "schedule_time": "09:00，14:30 20:00",
+                "generation_schedule_time": "10:00,15:30,21:00,15:30",
+            }
+        )
+        self.assertEqual(config["schedule_time"], "09:00,14:30,20:00")
+        self.assertEqual(config["generation_schedule_time"], "10:00,15:30,21:00")
+        with self.assertRaisesRegex(ValueError, "多个时间用逗号分隔"):
+            self.service.save_config({"schedule_time": "9点,14:00"})
 
     def test_pipeline_builds_separate_trend_and_prompt_pools_before_generation(self):
         discovery = {
@@ -212,9 +226,12 @@ class TrendServiceTests(unittest.TestCase):
                 "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
                 ("prompt-1", run_id, "trend-1", "POOL PROMPT", "ready", utc_now()),
             )
-        self.service.save_config(
-            {"enabled": False, "auto_generate": True, "generation_schedule_time": "00:00"}
-        )
+        current_time = datetime.now(ZoneInfo(self.service.get_config()["timezone"])).strftime("%H:%M")
+        self.service.save_config({
+            "enabled": False,
+            "auto_generate": True,
+            "generation_schedule_time": f"00:00,{current_time},23:59",
+        })
 
         async def exercise():
             launched = []
@@ -343,6 +360,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('id="cfgTime"', self.html)
         self.assertIn('id="cfgGenerationTime"', self.html)
         self.assertIn("generation_schedule_time", self.html)
+        self.assertIn("多个用逗号分隔", self.html)
         self.assertIn("每轮随机生图数（1–30）", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
