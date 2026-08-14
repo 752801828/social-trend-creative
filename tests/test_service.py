@@ -3,9 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -98,20 +96,20 @@ class TrendServiceTests(unittest.TestCase):
         self.assertFalse(config["enabled"])
         self.assertFalse(config["auto_generate"])
         self.assertEqual(config["generation_schedule_time"], "10:00")
+        self.assertEqual(config["acquisition_interval_minutes"], 165)
+        self.assertEqual(config["generation_interval_minutes"], 90)
         self.assertEqual(config["images_per_trend"], 5)
         self.assertNotIn("final_count", config)
 
-    def test_config_accepts_multiple_daily_schedule_times(self):
+    def test_config_accepts_independent_recurring_intervals(self):
         config = self.service.save_config(
             {
-                "schedule_time": "09:00，14:30 20:00",
-                "generation_schedule_time": "10:00,15:30,21:00,15:30",
+                "acquisition_interval_minutes": 165,
+                "generation_interval_minutes": 90,
             }
         )
-        self.assertEqual(config["schedule_time"], "09:00,14:30,20:00")
-        self.assertEqual(config["generation_schedule_time"], "10:00,15:30,21:00")
-        with self.assertRaisesRegex(ValueError, "多个时间用逗号分隔"):
-            self.service.save_config({"schedule_time": "9点,14:00"})
+        self.assertEqual(config["acquisition_interval_minutes"], 165)
+        self.assertEqual(config["generation_interval_minutes"], 90)
 
     def test_pipeline_builds_separate_trend_and_prompt_pools_before_generation(self):
         discovery = {
@@ -226,12 +224,14 @@ class TrendServiceTests(unittest.TestCase):
                 "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
                 ("prompt-1", run_id, "trend-1", "POOL PROMPT", "ready", utc_now()),
             )
-        current_time = datetime.now(ZoneInfo(self.service.get_config()["timezone"])).strftime("%H:%M")
         self.service.save_config({
             "enabled": False,
             "auto_generate": True,
-            "generation_schedule_time": f"00:00,{current_time},23:59",
+            "generation_interval_minutes": 90,
         })
+        self.service._generation_interval = 90
+        self.service._generation_enabled = True
+        self.service._next_generation_at = 0
 
         async def exercise():
             launched = []
@@ -357,10 +357,11 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("box-shadow:var(--shadow)", self.html)
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
-        self.assertIn('id="cfgTime"', self.html)
-        self.assertIn('id="cfgGenerationTime"', self.html)
-        self.assertIn("generation_schedule_time", self.html)
-        self.assertIn("多个用逗号分隔", self.html)
+        self.assertIn('id="cfgAcquireInterval"', self.html)
+        self.assertIn('id="cfgGenerationInterval"', self.html)
+        self.assertIn("acquisition_interval_minutes", self.html)
+        self.assertIn("generation_interval_minutes", self.html)
+        self.assertIn("热点、图案与提示词生成间隔（分钟）", self.html)
         self.assertIn("每轮随机生图数（1–30）", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):

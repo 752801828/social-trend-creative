@@ -54,6 +54,8 @@ DEFAULT_CONFIG = {
     "enabled": False,
     "schedule_time": "09:00",
     "generation_schedule_time": "10:00",
+    "acquisition_interval_minutes": 165,
+    "generation_interval_minutes": 90,
     "timezone": "Asia/Shanghai",
     "lookback_hours": 24,
     "regions": ["United States", "United Kingdom", "Europe", "Global English"],
@@ -88,15 +90,6 @@ def string_list(value: Any, *, limit: int, item_limit: int) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip()[:item_limit] for item in value if str(item).strip()][:limit]
-
-
-def normalise_schedule_times(value: Any, label: str) -> str:
-    times = list(dict.fromkeys(item for item in re.split(r"[,，\s]+", str(value or "")) if item))
-    if not times or len(times) > 24 or any(
-        not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", item) for item in times
-    ):
-        raise ValueError(f"{label}必须使用HH:MM格式，多个时间用逗号分隔，最多24个")
-    return ",".join(times)
 
 
 def safe_error(exc: Exception) -> str:
@@ -136,9 +129,12 @@ class TrendService:
         self.active_run_id: str | None = None
         self.scheduler_task: asyncio.Task | None = None
         self._stopping = False
-        self._scheduled_slots: set[str] = set()
-        self._generation_slots: set[str] = set()
-        self._scheduler_date = ""
+        self._acquisition_interval = 0
+        self._generation_interval = 0
+        self._acquisition_enabled = False
+        self._generation_enabled = False
+        self._next_acquisition_at = 0.0
+        self._next_generation_at = 0.0
         self._init_db()
 
     @contextmanager
@@ -260,14 +256,16 @@ class TrendService:
 
     def save_config(self, values: dict[str, Any]) -> dict[str, Any]:
         config = {**self.get_config(), **values}
-        config["schedule_time"] = normalise_schedule_times(config["schedule_time"], "热点获取时间")
-        config["generation_schedule_time"] = normalise_schedule_times(
-            config["generation_schedule_time"], "生图时间"
-        )
         ZoneInfo(str(config["timezone"]))
         config["lookback_hours"] = min(168, max(1, int(config["lookback_hours"])))
         config["candidate_count"] = min(30, max(1, int(config["candidate_count"])))
         config["images_per_trend"] = min(30, max(1, int(config["images_per_trend"])))
+        config["acquisition_interval_minutes"] = min(
+            1440, max(15, int(config["acquisition_interval_minutes"]))
+        )
+        config["generation_interval_minutes"] = min(
+            1440, max(15, int(config["generation_interval_minutes"]))
+        )
         config["generation_concurrency"] = min(5, max(1, int(config["generation_concurrency"])))
         config["regions"] = [str(item).strip() for item in config.get("regions", []) if str(item).strip()][:20]
         config["platforms"] = [str(item).strip() for item in config.get("platforms", []) if str(item).strip()][:20]
@@ -1054,32 +1052,27 @@ Requirements:
         while not self._stopping:
             try:
                 config = self.get_config()
-                local = datetime.now(ZoneInfo(config["timezone"]))
-                date_key = local.date().isoformat()
-                current_time = local.strftime("%H:%M")
-                acquisition_times = config["schedule_time"].split(",")
-                generation_times = config["generation_schedule_time"].split(",")
-                if self._scheduler_date != date_key:
-                    self._scheduler_date = date_key
-                    self._scheduled_slots = {f"{date_key}|{slot}" for slot in acquisition_times if slot < current_time}
-                    self._generation_slots = {f"{date_key}|{slot}" for slot in generation_times if slot < current_time}
-                if config.get("enabled"):
-                    due = next(
-                        (slot for slot in acquisition_times if slot <= current_time and f"{date_key}|{slot}" not in self._scheduled_slots),
-                        None,
+                acquisition_interval = int(config["acquisition_interval_minutes"])
+                generation_interval = int(config["generation_interval_minutes"])
+                acquisition_enabled = bool(config.get("enabled"))
+                generation_enabled = bool(config.get("auto_generate"))
+                now = time.monotonic()
+                if self._acquisition_interval != acquisition_interval or self._acquisition_enabled != acquisition_enabled:
+                    self._acquisition_interval = acquisition_interval
+                    self._acquisition_enabled = acquisition_enabled
+                    self._next_acquisition_at = now + acquisition_interval * 60
+                if self._generation_interval != generation_interval or self._generation_enabled != generation_enabled:
+                    self._generation_interval = generation_interval
+                    self._generation_enabled = generation_enabled
+                    self._next_generation_at = now + generation_interval * 60
+                if acquisition_enabled and now >= self._next_acquisition_at:
+                    run_id = self.launch_full_pipeline(
+                        trigger_type="scheduled",
+                        auto_generate=False,
                     )
-                    if due:
-                        run_id = self.launch_full_pipeline(
-                            trigger_type="scheduled",
-                            auto_generate=False,
-                        )
-                        if run_id:
-                            self._scheduled_slots.add(f"{date_key}|{due}")
-                due = next(
-                    (slot for slot in generation_times if slot <= current_time and f"{date_key}|{slot}" not in self._generation_slots),
-                    None,
-                )
-                if config.get("auto_generate") and due:
+                    if run_id:
+                        self._next_acquisition_at = now + acquisition_interval * 60
+                if generation_enabled and now >= self._next_generation_at:
                     with self._connect() as db:
                         latest = db.execute(
                             """SELECT r.id FROM runs r
@@ -1090,7 +1083,7 @@ Requirements:
                                ORDER BY r.started_at DESC LIMIT 1"""
                         ).fetchone()
                     if latest and self.launch_generation(latest["id"]):
-                        self._generation_slots.add(f"{date_key}|{due}")
+                        self._next_generation_at = now + generation_interval * 60
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 raise
