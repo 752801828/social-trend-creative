@@ -385,6 +385,14 @@ class StaticPageTests(unittest.TestCase):
         self.assertNotIn("sessionStorage", self.html)
         self.assertNotIn("document.cookie", self.html)
 
+    def test_project_update_button_uses_the_protected_update_api(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('id="updateBtn"', self.html)
+        self.assertIn("updateProject()", self.html)
+        self.assertIn("watchProjectUpdate", self.html)
+        self.assertIn('@app.post("/api/system/update", dependencies=[Depends(require_admin)]', main)
+        self.assertIn("当前有热点或生图任务运行", main)
+
 
 if __name__ == "__main__":
     unittest.main()

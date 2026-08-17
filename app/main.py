@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,12 +12,27 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.service import FLOW_MODELS, GEMINI_MODELS, TrendService
+from app.service import FLOW_MODELS, GEMINI_MODELS, TrendService, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 service = TrendService()
+UPDATE_REQUEST_PATH = service.data_dir / "update-request.json"
+UPDATE_STATUS_PATH = service.data_dir / "update-status.json"
+
+
+def read_update_status() -> dict:
+    try:
+        return json.loads(UPDATE_STATUS_PATH.read_text(encoding="utf-8-sig"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"status": "idle", "message": "尚未请求更新"}
+
+
+def write_update_file(path: Path, payload: dict) -> None:
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 @asynccontextmanager
@@ -87,7 +104,31 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
         "dashboard": service.dashboard(),
         "runs": service.list_runs(limit),
+        "update": read_update_status(),
     }
+
+
+@app.get("/api/system/update", dependencies=[Depends(require_admin)])
+async def system_update_status():
+    return read_update_status()
+
+
+@app.post("/api/system/update", dependencies=[Depends(require_admin)], status_code=202)
+async def request_system_update():
+    if service.active_task and not service.active_task.done():
+        raise HTTPException(status_code=409, detail="当前有热点或生图任务运行，请等待任务完成后再更新")
+    current = read_update_status()
+    if current.get("status") in {"pending", "running"}:
+        raise HTTPException(status_code=409, detail="项目更新已在进行中")
+    request = {
+        "request_id": secrets.token_hex(8),
+        "status": "pending",
+        "message": "等待服务机更新器处理",
+        "requested_at": utc_now(),
+    }
+    write_update_file(UPDATE_STATUS_PATH, request)
+    write_update_file(UPDATE_REQUEST_PATH, request)
+    return request
 
 
 @app.put("/api/config", dependencies=[Depends(require_admin)])

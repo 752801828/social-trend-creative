@@ -105,6 +105,8 @@ Authorization: Bearer <ADMIN_KEY>
 ```
 
 - `GET /api/state`
+- `GET /api/system/update`：读取最近一次项目更新状态
+- `POST /api/system/update`：请求服务机更新器拉取 `main`、重建并重启本项目
 - `PUT /api/config`
 - `POST /api/connections/test`
 - `POST /api/runs/discover`：①②③同一轮次顺序执行
@@ -172,6 +174,15 @@ docker compose ps
 curl http://localhost:5920/health
 ```
 
+首次启用管理页“更新并重启”按钮时，在服务机用具备 GitHub 拉取权限和 Docker Desktop 权限的当前 Windows 用户安装常驻更新器：
+
+```powershell
+cd D:\social-trend-creative
+powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
+```
+
+按钮通过受管理密钥保护的 `POST /api/system/update` 写入共享 `data` 更新请求；计划任务 `SocialTrendCreativeUpdater` 执行 `git pull --ff-only origin main` 和 `docker compose up -d --build social-trend-creative`。它不会管理 Flow/Gemini 容器；运行中的业务任务或服务机未提交修改都会阻止更新。更新状态写入 `data/update-status.json`，日志写入 `data/update-watcher.log`。
+
 ## 后续修改规则
 
 1. 先读取 `AGENTS.md`、本文件、`CONTEXT.md`、`README.md` 和持续变更日志，再检查代码与 Git。
@@ -187,6 +198,6 @@ curl http://localhost:5920/health
 - 全量图案对应提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
 - 管理页已拆成总览和四个独立 URL 模块，可按轮次查看全部热点、可用图案池、提示词池和生图池；整体使用 StyleKit 日系清新风。
 - 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
-- 当前测试共 20 项。
+- 当前测试共 22 项。
 
 新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。

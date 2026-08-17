@@ -84,6 +84,17 @@ curl http://localhost:5920/health
 
 独立服务不会启动、停止或重建 Flow/Gemini 容器。
 
+### 网页一键更新
+
+首次部署本功能后，在服务机用当前拥有 GitHub 拉取权限、且能运行 Docker Desktop 的 Windows 用户执行一次：
+
+```powershell
+cd D:\social-trend-creative
+powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
+```
+
+计划任务 `SocialTrendCreativeUpdater` 会在该用户登录时常驻。管理页的“更新并重启”按钮写入 `data/update-request.json`；更新器确认仓库位于 `main` 且工作区干净后，执行 `git pull --ff-only origin main`、只重建 `social-trend-creative` 服务并等待健康检查恢复。状态显示在按钮与提示消息中，详细日志保存在 `data/update-watcher.log`。热点或生图任务执行中、工作区有未提交修改时会安全拒绝更新。
+
 ## API
 
 除 `/`、`/health` 和生成图片外，管理 API 要求：
@@ -93,6 +104,8 @@ Authorization: Bearer <ADMIN_KEY>
 ```
 
 - `GET /api/state`：配置、连接、统计和轮次。
+- `GET /api/system/update`：读取最近一次项目更新状态。
+- `POST /api/system/update`：请求服务机更新器拉取 `main`、重建并重启本项目。
 - `PUT /api/config`：更新每日策略。
 - `POST /api/connections/test`：测试 Gemini/Flow 连接。
 - `POST /api/runs/discover`：新建轮次并依次执行①热点获取、②图案提取、③提示词生成。
