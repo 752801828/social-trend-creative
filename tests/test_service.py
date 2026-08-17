@@ -348,6 +348,16 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("safeHttpUrl", self.html)
         self.assertIn("风险标记：", self.html)
 
+    def test_pool_cards_open_the_selected_content_inside_its_run(self):
+        self.assertIn("currentSelection", self.html)
+        self.assertIn("cardAttrs(run,'raw',item.candidate_id)", self.html)
+        self.assertIn("cardAttrs(run,'trend',item.id)", self.html)
+        self.assertIn("cardAttrs(run,'prompt',item.id)", self.html)
+        self.assertIn("cardAttrs(run,'image',item.id)", self.html)
+        self.assertIn("selectedContent", self.html)
+        self.assertIn("renderRawDetail", self.html)
+        self.assertIn("点击卡片查看对应内容", self.html)
+
     def test_stylekit_japanese_fresh_theme_is_applied(self):
         self.assertIn("Japanese Fresh", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
         self.assertIn("#e8eee8", self.html)

@@ -40,12 +40,15 @@ def require_admin(authorization: str = Header(default="")) -> None:
 class ConfigUpdate(BaseModel):
     enabled: bool | None = None
     schedule_time: str | None = None
+    generation_schedule_time: str | None = None
+    acquisition_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
+    generation_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
     timezone: str | None = None
     lookback_hours: int | None = Field(default=None, ge=1, le=168)
     regions: list[str] | None = None
     platforms: list[str] | None = None
     candidate_count: int | None = Field(default=None, ge=1, le=30)
-    images_per_trend: int | None = Field(default=None, ge=1, le=5)
+    images_per_trend: int | None = Field(default=None, ge=1, le=30)
     gemini_discovery_model: str | None = None
     gemini_verification_model: str | None = None
     flow_models: list[str] | None = None
@@ -102,10 +105,10 @@ async def test_connections():
 
 @app.post("/api/runs/discover", dependencies=[Depends(require_admin)], status_code=202)
 async def discover():
-    run_id = service.launch_acquisition(trigger_type="manual")
+    run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=False)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted"}
+    return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "prompt_pool"]}
 
 
 @app.post("/api/runs/full", dependencies=[Depends(require_admin)], status_code=202)
