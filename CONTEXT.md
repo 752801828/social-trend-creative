@@ -5,7 +5,7 @@ The project turns worldwide social signals into categorized creative inputs, reu
 ## Language
 
 **Source entry**:
-One immutable article, post, alert, or ranked item collected by TrendRadar from an overseas-media feed, hotlist, or RSSHub route before event clustering.
+One immutable article, post, alert, or ranked item collected by TrendRadar from a configured native feed or optional hotlist before event clustering.
 _Avoid_: Raw trend, article candidate
 
 **Source cluster**:
@@ -42,7 +42,7 @@ A realistic image of one physical item with trend-derived artwork printed direct
 Asking Gemini Web to research public sources and return raw trends. It is not proof of live browsing; real evidence is retained when available but is not a pipeline gate.
 
 **Feed-backed acquisition**:
-Creating raw trends from locally stored TrendRadar source entries, with RSSHub used only to make otherwise unavailable sources subscribable.
+Creating raw trends from locally stored TrendRadar source entries collected from configured native RSS feeds or optional hotlists.
 _Avoid_: RSS discovery, TrendRadar run
 
 **Priority region**:

@@ -31,7 +31,7 @@ git log -5 --oneline
 
 系统由独立来源同步和四个创作阶段组成：
 
-1. 来源同步：通过 TrendRadar Streamable HTTP MCP 幂等保存 RSS/可选热榜条目到 `source_entries`；RSSHub 只负责向 TrendRadar 提供可订阅路由。
+1. 来源同步：通过 TrendRadar Streamable HTTP MCP 幂等保存原生 RSS/可选热榜条目到 `source_entries`。
 2. 热点获取：将查询窗口内全部来源条目按事件聚类，Gemini 分批翻译、分类并标记风险，形成全类型原始热点。
 3. 图案提取：从全部原始热点分批提取安全、原创、可复用、与产品无关的视觉图案方向，写入 `trends`。
 4. 提示词生成：为全部尚未处理的可用图案逐条生成产品效果图提示词，写入 `prompt_pool`。
@@ -76,7 +76,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 随机生图间隔：90 分钟（1.5 小时）
 - 时区：`Asia/Shanghai`
 - 回溯窗口：24 小时
-- 地区：美国、英国、欧洲、全球英语区（优先覆盖）
+- 地区：美国为主要市场，全球英语区及少量印尼、日本来源用于补充可能影响美国市场的国际事件
 - 来源平台：X、TikTok、Instagram、YouTube、Reddit
 - AI 批处理大小：10，不限制最终热点总数
 - 每轮随机生图数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
@@ -121,7 +121,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `/`：全局总览、统计、连接、设置和一键完整流水线。
 - `/sources`：外媒来源、条目数量、最后内容与同步时间。
 - `/signals`：按发布日期倒序展示来源条目，可按来源筛选；点击只打开该条目。
-- 操作栏提供 TrendRadar `:8080`、RSSHub `:1200`、NewsNow `:4444` 外部前端入口，主机名取当前页面地址；端口连通性由部署环境负责。
+- 操作栏提供 TrendRadar `:8080`、NewsNow `:4444` 外部前端入口，主机名取当前页面地址；端口连通性由部署环境负责。
 - `/acquire`、`/trends`、`/prompts`、`/images` 均直接展示跨任务内容卡片，按内容日期倒序排列，无需先选轮次。
 - 点击任意内容卡片只打开对应热点、图案、提示词或图片，顶部同时显示所属任务摘要；图片本身仍可单独点击放大。
 - 任务详情可补齐中断的图案或提示词阶段，并可为随机生图手动指定 1–30 张。

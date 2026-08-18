@@ -1,14 +1,14 @@
 # Social Trend Creative
 
-独立的全球外媒热点物品图创作服务。TrendRadar 持续汇总外媒 RSS，RSSHub 将没有原生 Feed 的站点转换为可订阅来源；本项目通过 TrendRadar MCP 保存来源条目、聚合同一事件，再提取安全可用图案、生成产品提示词和最终图片。
+独立的全球外媒热点物品图创作服务。TrendRadar 持续汇总配置好的外媒原生 RSS；本项目通过 TrendRadar MCP 保存来源条目、聚合同一事件，再提取安全可用图案、生成产品提示词和最终图片。
 
-项目不导入或修改 TrendRadar、RSSHub、newsnow、Gemini2API 或 Flow2API 源码。TrendRadar 通过 Streamable HTTP MCP 连接，Gemini2API 和 Flow2API 通过 HTTP API 连接。
+项目不导入或修改 TrendRadar、newsnow、Gemini2API 或 Flow2API 源码。TrendRadar 通过 Streamable HTTP MCP 连接，Gemini2API 和 Flow2API 通过 HTTP API 连接。
 
 ## 五阶段流水线
 
 | 阶段 | 输入 | 处理 | 输出 |
 | --- | --- | --- | --- |
-| ① 外媒采集 | TrendRadar RSS/热榜，RSSHub 路由 | 通过 TrendRadar MCP 幂等同步文章、帖子和预警，不在此阶段筛选商品价值 | 来源条目池 `source_entries` |
+| ① 外媒采集 | TrendRadar 原生 RSS/可选热榜 | 通过 TrendRadar MCP 幂等同步文章、帖子和预警，不在此阶段筛选商品价值 | 来源条目池 `source_entries` |
 | ② 热点聚类 | 查询窗口内全部来源条目 | 标题聚类同一事件，Gemini 分批翻译、分类并标记风险；`candidate_count` 仅表示 AI 批大小 | 全类型原始热点 |
 | ③ 图案提取 | 同一任务的全部原始热点 | Gemini 分批提取安全、原创、可复用且不依赖商标、版权角色或真人肖像的视觉方向 | 可用图案池 `trends` |
 | ④ 提示词生成 | 同一任务全部尚未处理的可用图案 | Gemini 为每个图案建立对应产品提示词，写明图案、位置、比例、印刷处理、产品底色、材质、镜头和灯光 | 提示词池 `prompt_pool` |
@@ -42,7 +42,7 @@
 - `/prompts`：直接展示所有任务的完整提示词卡片。
 - `/images`：直接展示全部生成图片，图片可点击放大。
 
-操作栏下方提供 TrendRadar、RSSHub 和 NewsNow 前端入口，使用当前页面主机名自动生成 `8080`、`1200`、`4444` 端口链接并在新窗口打开。链接不代理流量；目标容器、Windows 防火墙和云安全组必须允许对应端口访问。
+操作栏下方提供 TrendRadar 和 NewsNow 前端入口，使用当前页面主机名自动生成 `8080`、`4444` 端口链接并在新窗口打开。链接不代理流量；目标容器、Windows 防火墙和云安全组必须允许对应端口访问。
 
 各池卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。页面打开后自动连接同源 API，不再要求输入管理密钥。
 
@@ -89,9 +89,149 @@ docker compose ps
 curl http://localhost:5920/health
 ```
 
-独立服务不会启动、停止或重建 TrendRadar、RSSHub、newsnow、Flow 或 Gemini 容器。
+独立服务不会启动、停止或重建 TrendRadar、newsnow、Flow 或 Gemini 容器。
 
-TrendRadar、RSSHub 和 newsnow 继续在各自目录独立部署。本项目不读 TrendRadar SQLite；RSSHub 路由先订阅到 TrendRadar，再由本项目统一从 MCP 获取。
+TrendRadar 和 newsnow 继续在各自目录独立部署。本项目不读 TrendRadar SQLite；外媒原生 RSS 由 TrendRadar 统一采集，再由本项目从 MCP 获取。
+
+### TrendRadar 原生 RSS
+
+[`awesome-rss-feeds`](https://github.com/plenaryapp/awesome-rss-feeds) 可作为选源目录：它按国家和主题提供 OPML，但不应整包导入。目录中包含重复源、播客、YouTube、旧 HTTP 地址和少量无法被标准 XML 解析的条目；同时 TrendRadar MCP 每次最多返回 500 条最新 RSS，源过多会让高频媒体挤占同步窗口。
+
+编辑服务机 `D:\TrendRadar\config\config.yaml` 中已有的 `rss.feeds`，不要再添加第二个顶层 `rss`。下面采用“美国优先、全球补充”：30 个核心源中 24 个是美国媒体或美国市场导向栏目，另外 6 个只补充可能影响美国市场的国际事件。新闻、商业、科技、文化、时尚、设计、科学、体育和网络文化都进入热点池，商品图案适配只在后续图案提取阶段判断。
+
+```yaml
+rss:
+  enabled: true
+  freshness_filter:
+    enabled: true
+    max_age_days: 2
+  feeds:
+    # 美国新闻和商业
+    - id: "nyt-home"
+      name: "The New York Times"
+      url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+    - id: "google-news-us"
+      name: "Google News US"
+      url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+    - id: "yahoo-news-most-viewed"
+      name: "Yahoo News Most Viewed"
+      url: "https://news.yahoo.com/rss/mostviewed"
+    - id: "npr-world"
+      name: "NPR World"
+      url: "https://feeds.npr.org/1004/rss.xml"
+    - id: "cnbc-top-news"
+      name: "CNBC Top News"
+      url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    - id: "latimes-world-nation"
+      name: "Los Angeles Times World & Nation"
+      url: "https://www.latimes.com/world-nation/rss2.0.xml"
+    - id: "politico-playbook"
+      name: "Politico Playbook"
+      url: "https://rss.politico.com/playbook.xml"
+    - id: "fortune"
+      name: "Fortune"
+      url: "https://fortune.com/feed"
+
+    # 美国科技、科学和体育
+    - id: "ars-technica"
+      name: "Ars Technica"
+      url: "https://feeds.arstechnica.com/arstechnica/index"
+    - id: "engadget"
+      name: "Engadget"
+      url: "https://www.engadget.com/rss.xml"
+    - id: "the-verge"
+      name: "The Verge"
+      url: "https://www.theverge.com/rss/index.xml"
+    - id: "cnet"
+      name: "CNET"
+      url: "https://www.cnet.com/rss/news/"
+    - id: "wired-science"
+      name: "Wired Science"
+      url: "https://www.wired.com/feed/category/science/latest/rss"
+    - id: "science-daily"
+      name: "ScienceDaily"
+      url: "https://www.sciencedaily.com/rss/all.xml"
+    - id: "espn-top"
+      name: "ESPN Top News"
+      url: "https://www.espn.com/espn/rss/news"
+
+    # 美国文化、时尚、设计和网络趋势
+    - id: "nyt-style"
+      name: "The New York Times Style"
+      url: "https://rss.nytimes.com/services/xml/rss/nyt/FashionandStyle.xml"
+    - id: "elle-fashion"
+      name: "ELLE Fashion"
+      url: "https://www.elle.com/rss/fashion.xml/"
+    - id: "fashionista"
+      name: "Fashionista"
+      url: "https://fashionista.com/.rss/excerpt/"
+    - id: "variety"
+      name: "Variety"
+      url: "https://variety.com/feed/"
+    - id: "pitchfork-news"
+      name: "Pitchfork News"
+      url: "https://pitchfork.com/rss/news/"
+    - id: "petapixel"
+      name: "PetaPixel"
+      url: "https://petapixel.com/feed/"
+    - id: "know-your-meme"
+      name: "Know Your Meme"
+      url: "https://knowyourmeme.com/newsfeed.rss"
+    - id: "design-milk"
+      name: "Design Milk"
+      url: "https://design-milk.com/category/interior-design/feed/"
+    - id: "atlas-obscura"
+      name: "Atlas Obscura"
+      url: "https://www.atlasobscura.com/feeds/latest"
+
+    # 国际补充
+    - id: "bbc-world"
+      name: "BBC World"
+      url: "https://feeds.bbci.co.uk/news/world/rss.xml"
+    - id: "guardian-world"
+      name: "The Guardian World"
+      url: "https://www.theguardian.com/world/rss"
+    - id: "aljazeera"
+      name: "Al Jazeera"
+      url: "https://www.aljazeera.com/xml/rss/all.xml"
+    - id: "dw-english"
+      name: "DW English"
+      url: "https://rss.dw.com/rdf/rss-en-all"
+    - id: "tribunnews-id"
+      name: "Tribunnews Indonesia"
+      url: "https://www.tribunnews.com/rss"
+    - id: "japan-times"
+      name: "The Japan Times"
+      url: "https://www.japantimes.co.jp/feed/topstories/"
+```
+
+扩充时从仓库的 `recommended/with_category/*.opml` 或 `countries/with_category/*.opml` 复制单个 `xmlUrl`，为它补一个稳定且唯一的 `id`；每次只增加 5–10 个源并观察一天。优先保留能持续返回新条目的外媒，删除连续失败、长期不更新或与现有源高度重复的订阅。OPML 是选源资料，TrendRadar 实际配置仍是上面的 YAML 列表。
+
+当前网络无法直连海外站点时，还需修改同一文件的 `advanced` 段。代理运行在 Windows 宿主机时，容器内必须使用 `host.docker.internal`，不能写 `127.0.0.1`：
+
+```yaml
+advanced:
+  crawler:
+    request_interval: 2000
+    use_proxy: true
+    default_proxy: "http://host.docker.internal:<代理端口>"
+  rss:
+    request_interval: 1000
+    timeout: 30
+    use_proxy: true
+    proxy_url: "http://host.docker.internal:<代理端口>"
+```
+
+修改后执行：
+
+```cmd
+cd /d D:\TrendRadar\docker
+docker compose restart trendradar trendradar-mcp
+docker exec trendradar python manage.py run
+docker logs --tail 200 trendradar
+curl.exe -X POST http://localhost:5920/api/sources/sync
+curl.exe http://localhost:5920/api/sources
+```
 
 ### 网页一键更新
 
