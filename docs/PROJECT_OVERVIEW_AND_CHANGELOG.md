@@ -140,3 +140,6 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 采用 `plenaryapp/awesome-rss-feeds` 作为外媒选源目录，将 TrendRadar 起始清单调整为“美国优先、全球补充”的 30 个分组核心源，其中 24 个为美国媒体或美国市场导向栏目，覆盖新闻、商业、科技、文化、时尚、设计、科学、体育和网络文化；明确 OPML 不整包导入，并补充增量扩源、失败源淘汰、手动采集及来源池验证命令。
 - README 增加 TrendRadar 原生 AI 与飞书部署配置：采用“美国 RSS 为主、中文热榜补充”，让 AI 联合分析中文热榜与美国优先 RSS，复用宿主机 Gemini2API 的 OpenAI 兼容端点，并使用 `night_owl` 每日两个窗口各分析推送一次；Webhook 和 AI Key 仅保存在服务机 `D:\TrendRadar\docker\.env`，不进入 Git。
 - 已将不含密钥的 TrendRadar 默认配置直接提交到 `752801828/TrendRadar@822ce07`：启用 11 个中文热榜、30 个美国优先 RSS、RSS AI 分析、中文翻译和 `night_owl` 调度；飞书 Webhook 继续由服务机环境变量注入。
+- 暂停独立 NewsNow 服务：管理页移除 `:4444` 前端入口，现行 README 与交接文档移除本地 NewsNow 部署依赖；TrendRadar 中文热榜仍由其自身 `platforms.api_url` 数据接口负责，本项目只消费 TrendRadar MCP。
+- Signal Studio 信息架构由七个平铺导航项收敛为总览、信息采集、AI 创意和成品图库四个顶部工作区；媒体源/原始资讯以及全部热点/可用图案/生成提示词改为组内标签，旧 URL 深链接继续有效，底层池数据不合并。
+- 移除只剩单一链接的“关联服务”栏，将 TrendRadar `:8080` 入口并入信息采集摘要区，并以回归测试确保 RSSHub、NewsNow、`:1200` 和 `:4444` 不再出现在现行页面。

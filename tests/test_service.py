@@ -374,13 +374,19 @@ class StaticPageTests(unittest.TestCase):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         for path, label in (
             ("/acquire", "全部热点"),
-            ("/trends", "可用图案池"),
-            ("/prompts", "提示词池"),
-            ("/images", "生图池"),
+            ("/trends", "可用图案"),
+            ("/prompts", "生成提示词"),
+            ("/images", "成品图库"),
         ):
             self.assertIn(f'@app.get("{path}")', main)
-            self.assertIn(f'href="{path}"', self.html)
             self.assertIn(label, self.html)
+        for label in ("总览", "信息采集", "AI 创意", "成品图库"):
+            self.assertIn(label, self.html)
+        self.assertEqual(self.html.count('class="module-nav"'), 1)
+        self.assertEqual(self.html.count('data-group="'), 4)
+        self.assertIn('id="moduleTabs"', self.html)
+        self.assertIn("groupTabs", self.html)
+        self.assertIn("renderModuleTabs", self.html)
         self.assertIn('id="moduleContent"', self.html)
         self.assertIn("renderModuleContent", self.html)
         self.assertIn("moduleEntries", self.html)
@@ -391,9 +397,8 @@ class StaticPageTests(unittest.TestCase):
 
     def test_feed_source_and_entry_pages_are_independent(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-        for path, label in (("/sources", "外媒来源"), ("/signals", "来源条目")):
+        for path, label in (("/sources", "媒体源"), ("/signals", "原始资讯")):
             self.assertIn(f'@app.get("{path}")', main)
-            self.assertIn(f'href="{path}"', self.html)
             self.assertIn(label, self.html)
         self.assertIn("/api/sources/sync", self.html)
         self.assertIn("/api/signals/${encodeURIComponent(entryId)}", self.html)
@@ -464,13 +469,13 @@ class StaticPageTests(unittest.TestCase):
         self.assertNotIn("document.cookie", self.html)
 
     def test_related_service_frontends_are_linked_by_current_host(self):
-        self.assertIn("关联服务", self.html)
         self.assertIn("检测上游服务", self.html)
-        for name, port in (("TrendRadar", "8080"), ("NewsNow", "4444")):
-            self.assertIn(name, self.html)
-            self.assertIn(f'data-service-port="{port}"', self.html)
+        self.assertIn("打开 TrendRadar", self.html)
+        self.assertIn("serviceUrl(8080)", self.html)
+        self.assertNotIn("关联服务", self.html)
+        self.assertNotIn("data-service-port", self.html)
         self.assertNotIn("RSSHub", self.html)
-        self.assertIn("url.port=link.dataset.servicePort", self.html)
+        self.assertNotIn("NewsNow", self.html)
         self.assertIn('target="_blank"', self.html)
 
     def test_project_update_button_uses_the_update_api(self):

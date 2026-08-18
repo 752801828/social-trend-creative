@@ -2,7 +2,7 @@
 
 独立的全球外媒热点物品图创作服务。TrendRadar 持续汇总配置好的外媒原生 RSS；本项目通过 TrendRadar MCP 保存来源条目、聚合同一事件，再提取安全可用图案、生成产品提示词和最终图片。
 
-项目不导入或修改 TrendRadar、newsnow、Gemini2API 或 Flow2API 源码。TrendRadar 通过 Streamable HTTP MCP 连接，Gemini2API 和 Flow2API 通过 HTTP API 连接。
+项目不导入或修改 TrendRadar、Gemini2API 或 Flow2API 源码。TrendRadar 通过 Streamable HTTP MCP 连接，Gemini2API 和 Flow2API 通过 HTTP API 连接。
 
 ## 五阶段流水线
 
@@ -33,18 +33,16 @@
 
 “获取热点”固定建立热点、图案和提示词三池；“一键完整流水线”继续随机生图。外媒来源同步默认每 10 分钟、三池默认每 165 分钟（2 小时 45 分）、随机生图默认每 90 分钟（1.5 小时），三个开关均默认关闭。`candidate_count` 是 Gemini 分批处理大小，不再限制最终热点总数。
 
-每个模块都有独立页面，并可从顶部模块导航进入：
+顶部导航按工作阶段收敛为四个入口，底层数据表和任务关系不合并：
 
-- `/sources`：展示外媒来源、条目数量和最后更新时间；点击来源筛选其条目。
-- `/signals`：展示来源条目卡片；点击只查看对应文章或预警的原始信息。
-- `/acquire`：展示聚类后的全部热点卡片。
-- `/trends`：直接展示所有任务的可用图案卡片。
-- `/prompts`：直接展示所有任务的完整提示词卡片。
-- `/images`：直接展示全部生成图片，图片可点击放大。
+- `/`：总览、统计、自动化设置和任务档案。
+- `/sources`：信息采集；组内标签切换“媒体源”和 `/signals`“原始资讯”。
+- `/acquire`：AI 创意；组内标签切换“全部热点”、`/trends`“可用图案”和 `/prompts`“生成提示词”。
+- `/images`：成品图库；直接展示全部生成图片并支持点击放大。
 
-操作栏下方提供 TrendRadar 和 NewsNow 前端入口，使用当前页面主机名自动生成 `8080`、`4444` 端口链接并在新窗口打开。链接不代理流量；目标容器、Windows 防火墙和云安全组必须允许对应端口访问。
+`/signals`、`/trends`、`/prompts` 继续作为可直接访问的深链接，但不再占用顶部导航。TrendRadar `:8080` 入口移入“信息采集”摘要区；独立“关联服务”栏以及 RSSHub、NewsNow 入口均已移除。
 
-各池卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。页面打开后自动连接同源 API，不再要求输入管理密钥。
+各视图卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。页面打开后自动连接同源 API，不再要求输入管理密钥。
 
 界面沿用 StyleKit `Japanese Fresh（日系清新风）`，但将页面底色加深为灰绿色纸张、提高文字和边框对比度，并为内容卡片增加清晰阴影，避免大面积纯白难以辨认。
 
@@ -89,9 +87,9 @@ docker compose ps
 curl http://localhost:5920/health
 ```
 
-独立服务不会启动、停止或重建 TrendRadar、newsnow、Flow 或 Gemini 容器。
+独立服务不会启动、停止或重建 TrendRadar、Flow 或 Gemini 容器。
 
-TrendRadar 和 newsnow 继续在各自目录独立部署。本项目不读 TrendRadar SQLite；外媒原生 RSS 由 TrendRadar 统一采集，再由本项目从 MCP 获取。
+TrendRadar 继续独立部署。本地 NewsNow 服务已暂停且不再提供管理页入口；TrendRadar 中文热榜保留使用其 `platforms.api_url` 配置的数据接口。本项目不读 TrendRadar SQLite；外媒原生 RSS 由 TrendRadar 统一采集，再由本项目从 MCP 获取。
 
 ### TrendRadar 原生 RSS
 
