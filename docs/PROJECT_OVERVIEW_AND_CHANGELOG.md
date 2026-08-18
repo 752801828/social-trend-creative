@@ -17,7 +17,7 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 证据URL和发布时间为可选参考，不作为生图门禁；不得伪造来源。
 - 不设置旧的“最终最多保留 5 条热点”门禁；同事件报道在聚类阶段合并，不安全方向只在图案提取阶段处理。
 - “热点来源平台”只表示发现来源，不是图片发布渠道或目标平台。
-- 管理API使用独立Bearer密钥；浏览器不持久化密钥。
+- 管理页面打开后自动连接同源 API，不要求输入管理密钥；`5920` 端口只允许部署在可信内网。
 - 密钥、Webhook和签名只从环境变量读取，不写入数据库或日志。
 
 ## 数据与部署
@@ -132,3 +132,5 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - `.env.example` 增加 Docker 到宿主机 MCP 地址 `http://host.docker.internal:3333/mcp`，依赖增加 `mcp>=1.16,<2`。
 - 新增领域词汇 Source entry、Source cluster、Source sync 和 Feed-backed acquisition，并记录 ADR `docs/adr/0001-trendradar-mcp-source-boundary.md`，明确 MCP 是唯一 TrendRadar 数据边界。
 - 新增来源同步幂等、跨媒体同事件聚类、来源/条目界面和来源设置回归检查；当前自动化测试共 26 项。
+- 根据实际内网使用方式移除 `ADMIN_KEY`、Bearer 请求头和所有 FastAPI 管理路由鉴权依赖；页面初始化后自动调用 `/api/state`，顶部只显示自动连接状态。
+- `.env.example` 不再要求管理密钥；README 和交接文档明确 `5920` 不得直接暴露公网，公网使用时须由反向代理提供认证、访问控制和 HTTPS。

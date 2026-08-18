@@ -450,17 +450,25 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('aria-label="关闭放大图"', self.html)
         self.assertIn("cursor:zoom-in", self.html)
 
-    def test_credentials_are_not_persisted_in_browser_storage(self):
+    def test_page_connects_automatically_without_admin_key(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("已自动连接", self.html)
+        self.assertIn("renderPage();loadState();", self.html)
+        self.assertNotIn('id="adminKey"', self.html)
+        self.assertNotIn("Authorization:`Bearer", self.html)
+        self.assertNotIn("require_admin", main)
+        self.assertNotIn("ADMIN_KEY", env_example)
         self.assertNotIn("localStorage", self.html)
         self.assertNotIn("sessionStorage", self.html)
         self.assertNotIn("document.cookie", self.html)
 
-    def test_project_update_button_uses_the_protected_update_api(self):
+    def test_project_update_button_uses_the_update_api(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('id="updateBtn"', self.html)
         self.assertIn("updateProject()", self.html)
         self.assertIn("watchProjectUpdate", self.html)
-        self.assertIn('@app.post("/api/system/update", dependencies=[Depends(require_admin)]', main)
+        self.assertIn('@app.post("/api/system/update", status_code=202)', main)
         self.assertIn("当前有热点或生图任务运行", main)
 
 

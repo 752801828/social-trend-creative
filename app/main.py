@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -16,7 +15,6 @@ from app.service import FLOW_MODELS, GEMINI_MODELS, TrendService, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 service = TrendService()
 UPDATE_REQUEST_PATH = service.data_dir / "update-request.json"
 UPDATE_STATUS_PATH = service.data_dir / "update-status.json"
@@ -44,14 +42,6 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Social Trend Creative", version="0.1.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=service.assets_dir), name="assets")
-
-
-def require_admin(authorization: str = Header(default="")) -> None:
-    if not ADMIN_KEY:
-        raise HTTPException(status_code=503, detail="ADMIN_KEY未配置")
-    supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not supplied or not hmac.compare_digest(supplied, ADMIN_KEY):
-        raise HTTPException(status_code=401, detail="管理密钥无效")
 
 
 class ConfigUpdate(BaseModel):
@@ -102,7 +92,7 @@ async def health():
     return {"status": "ok", "service": "social-trend-creative"}
 
 
-@app.get("/api/state", dependencies=[Depends(require_admin)])
+@app.get("/api/state")
 async def state(limit: int = Query(default=40, ge=1, le=200)):
     return {
         "config": service.get_config(),
@@ -115,12 +105,12 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
     }
 
 
-@app.get("/api/sources", dependencies=[Depends(require_admin)])
+@app.get("/api/sources")
 async def sources():
     return service.source_state()
 
 
-@app.post("/api/sources/sync", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/sources/sync", status_code=202)
 async def sync_sources():
     try:
         launched = service.launch_source_sync()
@@ -131,7 +121,7 @@ async def sync_sources():
     return {"status": "accepted"}
 
 
-@app.get("/api/signals", dependencies=[Depends(require_admin)])
+@app.get("/api/signals")
 async def signals(
     limit: int = Query(default=200, ge=1, le=1000),
     source_id: str | None = Query(default=None, max_length=200),
@@ -139,7 +129,7 @@ async def signals(
     return {"entries": service.list_source_entries(limit, source_id=source_id)}
 
 
-@app.get("/api/signals/{entry_id}", dependencies=[Depends(require_admin)])
+@app.get("/api/signals/{entry_id}")
 async def signal(entry_id: str):
     entry = service.get_source_entry(entry_id)
     if not entry:
@@ -147,12 +137,12 @@ async def signal(entry_id: str):
     return entry
 
 
-@app.get("/api/system/update", dependencies=[Depends(require_admin)])
+@app.get("/api/system/update")
 async def system_update_status():
     return read_update_status()
 
 
-@app.post("/api/system/update", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/system/update", status_code=202)
 async def request_system_update():
     if service.active_task and not service.active_task.done():
         raise HTTPException(status_code=409, detail="当前有热点或生图任务运行，请等待任务完成后再更新")
@@ -170,7 +160,7 @@ async def request_system_update():
     return request
 
 
-@app.put("/api/config", dependencies=[Depends(require_admin)])
+@app.put("/api/config")
 async def update_config(update: ConfigUpdate):
     try:
         return {"config": service.save_config(update.model_dump(exclude_none=True))}
@@ -178,12 +168,12 @@ async def update_config(update: ConfigUpdate):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/connections/test", dependencies=[Depends(require_admin)])
+@app.post("/api/connections/test")
 async def test_connections():
     return await service.test_connections()
 
 
-@app.post("/api/runs/discover", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/runs/discover", status_code=202)
 async def discover():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=False)
     if not run_id:
@@ -191,7 +181,7 @@ async def discover():
     return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "prompt_pool"]}
 
 
-@app.post("/api/runs/full", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/runs/full", status_code=202)
 async def full_run():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=True)
     if not run_id:
@@ -199,7 +189,7 @@ async def full_run():
     return {"run_id": run_id, "status": "accepted", "auto_generate": True}
 
 
-@app.get("/api/runs/{run_id}", dependencies=[Depends(require_admin)])
+@app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     run = service.get_run(run_id)
     if not run:
@@ -207,7 +197,7 @@ async def get_run(run_id: str):
     return run
 
 
-@app.post("/api/runs/{run_id}/classify", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/runs/{run_id}/classify", status_code=202)
 async def classify(run_id: str):
     try:
         launched = service.launch_classification(run_id)
@@ -218,7 +208,7 @@ async def classify(run_id: str):
     return {"run_id": run_id, "status": "accepted"}
 
 
-@app.post("/api/runs/{run_id}/prompts", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/runs/{run_id}/prompts", status_code=202)
 async def prompts(run_id: str, request: PoolRequest):
     try:
         launched = service.launch_prompt_pool(run_id, request.count)
@@ -229,7 +219,7 @@ async def prompts(run_id: str, request: PoolRequest):
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
-@app.post("/api/runs/{run_id}/generate", dependencies=[Depends(require_admin)], status_code=202)
+@app.post("/api/runs/{run_id}/generate", status_code=202)
 async def generate(run_id: str, request: PoolRequest):
     try:
         launched = service.launch_generation(run_id, request.count)
@@ -240,7 +230,7 @@ async def generate(run_id: str, request: PoolRequest):
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
-@app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(require_admin)])
+@app.post("/api/runs/{run_id}/cancel")
 async def cancel(run_id: str):
     if service.active_run_id != run_id or not service.active_task or service.active_task.done():
         return {"cancelled": False}
@@ -248,7 +238,7 @@ async def cancel(run_id: str):
     return {"cancelled": True}
 
 
-@app.delete("/api/runs/{run_id}", dependencies=[Depends(require_admin)])
+@app.delete("/api/runs/{run_id}")
 async def delete_run(run_id: str):
     try:
         deleted = service.delete_run(run_id)

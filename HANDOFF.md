@@ -90,21 +90,17 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 ## 主要文件
 
-- `app/main.py`：FastAPI、Bearer 鉴权、来源池和创作流水线 API。
+- `app/main.py`：FastAPI、来源池和创作流水线 API；页面与 API 默认同源直连。
 - `app/service.py`：TrendRadar MCP、SQLite、事件聚类、Gemini/Flow 调用、调度、安全筛选和飞书通知。
 - `static/index.html`：来源、来源条目、三池、生图、详情和图片放大界面。
-- `tests/test_service.py`：解析、阶段隔离、提示词池消费、取消恢复和鉴权隔离测试。
+- `tests/test_service.py`：解析、阶段隔离、提示词池消费、取消恢复和自动连接测试。
 - `CONTEXT.md`：领域术语和统一命名。
 - `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：必须持续更新的架构总览与变更日志。
 - `data/`：SQLite 和生成图片，不能进入 Git。
 
 ## 管理 API
 
-除 `/`、`/health` 和 `/assets/...` 外均使用：
-
-```http
-Authorization: Bearer <ADMIN_KEY>
-```
+管理页面和 API 默认不鉴权，浏览器打开页面后自动加载状态。服务端口 `5920` 只应开放在可信内网；公网部署必须在反向代理层补充认证和 HTTPS。
 
 - `GET /api/state`
 - `GET /api/system/update`：读取最近一次项目更新状态
@@ -145,7 +141,6 @@ Authorization: Bearer <ADMIN_KEY>
 ## 环境变量
 
 ```env
-ADMIN_KEY=<管理密钥>
 GEMINI_BASE_URL=http://host.docker.internal:5918
 GEMINI_API_KEY=<Gemini2API Key>
 FLOW_BASE_URL=http://host.docker.internal:38000
@@ -158,7 +153,7 @@ DATA_DIR=/app/data
 PORT=5920
 ```
 
-真实密钥不得写入代码、日志、文档、测试或 Git。TrendRadar MCP 服务机地址为 `http://127.0.0.1:3333/mcp`，Docker 内必须使用 `host.docker.internal`。
+上游真实密钥不得写入代码、日志、文档、测试或 Git。TrendRadar MCP 服务机地址为 `http://127.0.0.1:3333/mcp`，Docker 内必须使用 `host.docker.internal`。
 
 ## 验证与部署
 
@@ -186,7 +181,7 @@ cd D:\social-trend-creative
 powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 ```
 
-按钮通过受管理密钥保护的 `POST /api/system/update` 写入共享 `data` 更新请求；计划任务 `SocialTrendCreativeUpdater` 执行 `git pull --ff-only origin main` 和 `docker compose up -d --build social-trend-creative`。它不会管理 Flow/Gemini 容器；运行中的业务任务或服务机未提交修改都会阻止更新。更新状态写入 `data/update-status.json`，日志写入 `data/update-watcher.log`。
+按钮通过同源 `POST /api/system/update` 写入共享 `data` 更新请求；计划任务 `SocialTrendCreativeUpdater` 执行 `git pull --ff-only origin main` 和 `docker compose up -d --build social-trend-creative`。它不会管理 Flow/Gemini 容器；运行中的业务任务或服务机未提交修改都会阻止更新。更新状态写入 `data/update-status.json`，日志写入 `data/update-watcher.log`。
 
 ## 后续修改规则
 

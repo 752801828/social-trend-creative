@@ -42,7 +42,7 @@
 - `/prompts`：直接展示所有任务的完整提示词卡片。
 - `/images`：直接展示全部生成图片，图片可点击放大。
 
-各池卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。模块间切换复用同一页面会话中的管理密钥，浏览器仍不持久化密钥。
+各池卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。页面打开后自动连接同源 API，不再要求输入管理密钥。
 
 界面沿用 StyleKit `Japanese Fresh（日系清新风）`，但将页面底色加深为灰绿色纸张、提高文字和边框对比度，并为内容卡片增加清晰阴影，避免大面积纯白难以辨认。
 
@@ -62,7 +62,6 @@ curl http://localhost:5920/health
 
 `.env` 至少配置：
 
-- `ADMIN_KEY`：独立管理页面密钥。
 - `GEMINI_BASE_URL` / `GEMINI_API_KEY`。
 - `FLOW_BASE_URL` / `FLOW_API_KEY`。
 - `TRENDRADAR_MCP_URL`：TrendRadar Streamable HTTP MCP；Docker 中使用 `http://host.docker.internal:3333/mcp`。
@@ -105,11 +104,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 
 ## API
 
-除 `/`、`/health` 和生成图片外，管理 API 要求：
-
-```http
-Authorization: Bearer <ADMIN_KEY>
-```
+管理页面和 API 默认不鉴权，打开页面即自动连接。`5920` 端口必须只开放在可信内网；如需公网访问，应在反向代理层增加登录、访问控制和 HTTPS。
 
 - `GET /api/state`：配置、连接、统计和轮次。
 - `GET /api/system/update`：读取最近一次项目更新状态。
