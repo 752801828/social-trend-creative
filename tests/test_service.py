@@ -99,6 +99,9 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(config["acquisition_interval_minutes"], 165)
         self.assertEqual(config["generation_interval_minutes"], 90)
         self.assertEqual(config["images_per_trend"], 5)
+        self.assertFalse(config["source_sync_enabled"])
+        self.assertEqual(config["source_sync_interval_minutes"], 10)
+        self.assertFalse(config["source_include_hotlists"])
         self.assertNotIn("final_count", config)
 
     def test_config_accepts_independent_recurring_intervals(self):
@@ -248,6 +251,44 @@ class TrendServiceTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(exercise()), [run_id])
 
+    def test_trendradar_source_sync_is_idempotent(self):
+        self.service.trendradar_mcp_url = "http://trendradar-mcp:3333/mcp"
+
+        async def fake_mcp(name, arguments):
+            self.assertEqual(name, "get_latest_rss")
+            self.assertTrue(arguments["include_summary"])
+            return {
+                "success": True,
+                "data": [{
+                    "title": "Major earthquake strikes Indonesia",
+                    "feed_id": "bbc-world",
+                    "feed_name": "BBC World",
+                    "url": "https://example.com/quake?utm_source=rss",
+                    "published_at": "Tue, 18 Aug 2026 10:00:00 GMT",
+                    "author": "Reporter",
+                    "summary": "A major earthquake was reported.",
+                }],
+            }
+
+        self.service._call_mcp_tool = fake_mcp
+        first = asyncio.run(self.service.sync_source_entries())
+        second = asyncio.run(self.service.sync_source_entries())
+        entries = self.service.list_source_entries()
+        self.assertEqual(first, {"fetched": 1, "inserted": 1})
+        self.assertEqual(second, {"fetched": 1, "inserted": 0})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["url"], "https://example.com/quake")
+        self.assertEqual(entries[0]["published_at"], "2026-08-18T10:00:00+00:00")
+
+    def test_source_entries_cluster_repeated_overseas_reports(self):
+        entries = [
+            {"title": "Powerful earthquake strikes eastern Indonesia", "source_id": "bbc", "published_at": "2", "fetched_at": "2"},
+            {"title": "Powerful earthquake strikes Indonesia coast", "source_id": "reuters", "published_at": "1", "fetched_at": "1"},
+            {"title": "New phone launches with folding display", "source_id": "tech", "published_at": "3", "fetched_at": "3"},
+        ]
+        clusters = self.service._cluster_source_entries(entries)
+        self.assertEqual(sorted(len(cluster) for cluster in clusters), [1, 2])
+
     def test_external_flow_image_download_does_not_receive_api_key(self):
         requests = []
 
@@ -347,6 +388,35 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("cardAttrs", self.html)
         self.assertIn("safeHttpUrl", self.html)
         self.assertIn("风险标记：", self.html)
+
+    def test_feed_source_and_entry_pages_are_independent(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        for path, label in (("/sources", "外媒来源"), ("/signals", "来源条目")):
+            self.assertIn(f'@app.get("{path}")', main)
+            self.assertIn(f'href="{path}"', self.html)
+            self.assertIn(label, self.html)
+        self.assertIn("/api/sources/sync", self.html)
+        self.assertIn("/api/signals/${encodeURIComponent(entryId)}", self.html)
+        self.assertIn("renderSourceContent", self.html)
+        self.assertIn("renderSignalContent", self.html)
+        self.assertIn("openSignal", self.html)
+        self.assertIn("打开外媒原文", self.html)
+
+    def test_source_settings_and_trendradar_connection_are_exposed(self):
+        for element_id in (
+            "cfgSourceSync", "cfgSourceInterval", "cfgSourceRetention", "cfgSourceHotlists"
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        for config_key in (
+            "source_sync_enabled", "source_sync_interval_minutes",
+            "source_retention_days", "source_include_hotlists",
+        ):
+            self.assertIn(config_key, self.html)
+        self.assertIn("result.trendradar.ok", self.html)
+        self.assertIn(
+            "TRENDRADAR_MCP_URL=http://host.docker.internal:3333/mcp",
+            (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
+        )
 
     def test_pool_cards_open_the_selected_content_inside_its_run(self):
         self.assertIn("currentSelection", self.html)

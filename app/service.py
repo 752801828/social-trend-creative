@@ -16,10 +16,11 @@ import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -68,6 +69,16 @@ DEFAULT_CONFIG = {
     "generation_concurrency": 2,
     "auto_generate": False,
     "notify_enabled": False,
+    "source_sync_enabled": False,
+    "source_sync_interval_minutes": 10,
+    "source_retention_days": 30,
+    "source_include_hotlists": False,
+}
+
+SOURCE_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "in",
+    "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were",
+    "will", "with", "after", "amid", "new", "says", "over", "into", "latest", "live",
 }
 
 
@@ -96,6 +107,36 @@ def safe_error(exc: Exception) -> str:
     return re.sub(r"(?i)(authorization|api[_-]?key|bearer)\s*[:=]?\s*\S+", r"\1=***", str(exc))[:1000]
 
 
+def canonical_url(value: str) -> str:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    query = [
+        (key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid", "ref"}
+    ]
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", urlencode(query), ""))
+
+
+def parse_source_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     cleaned = str(text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
@@ -120,6 +161,10 @@ class TrendService:
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         self.flow_base_url = os.getenv("FLOW_BASE_URL", "http://127.0.0.1:38000").rstrip("/")
         self.flow_api_key = os.getenv("FLOW_API_KEY", "")
+        trendradar_url = os.getenv("TRENDRADAR_MCP_URL", "").strip()
+        self.trendradar_mcp_url = (
+            trendradar_url if trendradar_url.endswith("/mcp") else f"{trendradar_url.rstrip('/')}/mcp"
+        ) if trendradar_url else ""
         self.public_base_url = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
         self.feishu_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
         self.feishu_secret = os.getenv("FEISHU_SIGNING_SECRET", "").strip()
@@ -127,14 +172,19 @@ class TrendService:
         self.operation_lock = asyncio.Lock()
         self.active_task: asyncio.Task | None = None
         self.active_run_id: str | None = None
+        self.source_sync_task: asyncio.Task | None = None
+        self.source_sync_lock = asyncio.Lock()
         self.scheduler_task: asyncio.Task | None = None
         self._stopping = False
         self._acquisition_interval = 0
         self._generation_interval = 0
         self._acquisition_enabled = False
         self._generation_enabled = False
+        self._source_sync_interval = 0
+        self._source_sync_enabled = False
         self._next_acquisition_at = 0.0
         self._next_generation_at = 0.0
+        self._next_source_sync_at = 0.0
         self._init_db()
 
     @contextmanager
@@ -222,6 +272,35 @@ class TrendService:
                     finished_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_generations_run ON generations(run_id, trend_id);
+                CREATE TABLE IF NOT EXISTS source_entries (
+                    id TEXT PRIMARY KEY,
+                    external_id TEXT NOT NULL UNIQUE,
+                    source_kind TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    author TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    published_at TEXT,
+                    fetched_at TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    raw_payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_entries_date
+                    ON source_entries(published_at DESC, fetched_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_entries_source
+                    ON source_entries(source_id, published_at DESC);
+                CREATE TABLE IF NOT EXISTS source_sync_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    status TEXT NOT NULL,
+                    last_attempt_at TEXT,
+                    last_success_at TEXT,
+                    error TEXT NOT NULL DEFAULT '',
+                    fetched_count INTEGER NOT NULL DEFAULT 0,
+                    inserted_count INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             generation_columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
@@ -232,6 +311,9 @@ class TrendService:
                     "INSERT INTO settings(id, value, updated_at) VALUES(1, ?, ?)",
                     (json_text(DEFAULT_CONFIG), utc_now()),
                 )
+            db.execute(
+                "INSERT OR IGNORE INTO source_sync_state(id,status) VALUES(1,'idle')"
+            )
 
     async def start(self) -> None:
         if not self.scheduler_task or self.scheduler_task.done():
@@ -239,7 +321,7 @@ class TrendService:
 
     async def stop(self) -> None:
         self._stopping = True
-        for task in (self.scheduler_task, self.active_task):
+        for task in (self.scheduler_task, self.active_task, self.source_sync_task):
             if task and not task.done():
                 task.cancel()
         await self.http.aclose()
@@ -267,6 +349,12 @@ class TrendService:
             1440, max(15, int(config["generation_interval_minutes"]))
         )
         config["generation_concurrency"] = min(5, max(1, int(config["generation_concurrency"])))
+        config["source_sync_interval_minutes"] = min(
+            1440, max(5, int(config["source_sync_interval_minutes"]))
+        )
+        config["source_retention_days"] = min(
+            365, max(1, int(config["source_retention_days"]))
+        )
         config["regions"] = [str(item).strip() for item in config.get("regions", []) if str(item).strip()][:20]
         config["platforms"] = [str(item).strip() for item in config.get("platforms", []) if str(item).strip()][:20]
         if not config["regions"] or not config["platforms"]:
@@ -293,6 +381,8 @@ class TrendService:
             "flow_key_configured": bool(self.flow_api_key),
             "feishu_configured": bool(self.feishu_webhook),
             "public_base_url": self.public_base_url,
+            "trendradar_mcp_url": self.trendradar_mcp_url,
+            "trendradar_configured": bool(self.trendradar_mcp_url),
         }
 
     async def test_connections(self) -> dict[str, Any]:
@@ -312,11 +402,233 @@ class TrendService:
             except Exception as exc:
                 return {"ok": False, "status": 0, "error": safe_error(exc)}
 
-        gemini, flow = await asyncio.gather(
+        async def check_trendradar() -> dict[str, Any]:
+            if not self.trendradar_mcp_url:
+                return {"ok": False, "configured": False, "status": 0}
+            started = time.perf_counter()
+            try:
+                result = await self._call_mcp_tool("get_rss_feeds_status", {})
+                return {
+                    "ok": bool(result.get("success", True)),
+                    "configured": True,
+                    "status": 200,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                }
+            except Exception as exc:
+                return {"ok": False, "configured": True, "status": 0, "error": safe_error(exc)}
+
+        gemini, flow, trendradar = await asyncio.gather(
             check(self.gemini_base_url, self.gemini_api_key),
             check(self.flow_base_url, self.flow_api_key),
+            check_trendradar(),
         )
-        return {"gemini": gemini, "flow": flow}
+        return {"gemini": gemini, "flow": flow, "trendradar": trendradar}
+
+    async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not self.trendradar_mcp_url:
+            raise ValueError("TRENDRADAR_MCP_URL未配置")
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async with streamable_http_client(self.trendradar_mcp_url) as streams:
+            read_stream, write_stream = streams[:2]
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                response = await session.call_tool(name, arguments=arguments)
+        if response.isError:
+            raise RuntimeError(f"TrendRadar MCP工具调用失败: {name}")
+        text = "\n".join(
+            str(block.text) for block in response.content if getattr(block, "text", None)
+        ).strip()
+        if not text:
+            return {}
+        payload = json.loads(text)
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise ValueError(f"TrendRadar MCP工具{name}返回格式错误")
+        return payload
+
+    def launch_source_sync(self) -> bool:
+        if not self.trendradar_mcp_url:
+            raise ValueError("TRENDRADAR_MCP_URL未配置")
+        if self.source_sync_task and not self.source_sync_task.done():
+            return False
+        self.source_sync_task = asyncio.create_task(
+            self.sync_source_entries(), name="trendradar-source-sync"
+        )
+        return True
+
+    def _update_source_sync_state(self, **values: Any) -> None:
+        if not values:
+            return
+        columns = ", ".join(f"{key}=?" for key in values)
+        with self._connect() as db:
+            db.execute(
+                f"UPDATE source_sync_state SET {columns} WHERE id=1",
+                tuple(values.values()),
+            )
+
+    @staticmethod
+    def _source_items(kind: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        items = payload.get("data") if isinstance(payload.get("data"), list) else []
+        normalised = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "").strip()
+            if not title:
+                continue
+            if kind == "rss":
+                source_id = str(raw.get("feed_id") or "unknown")[:200]
+                source_name = str(raw.get("feed_name") or source_id)[:300]
+                source_time = parse_source_time(raw.get("published_at") or raw.get("date"))
+                summary = str(raw.get("summary") or "")[:10000]
+                platform = "RSS"
+            else:
+                source_id = str(raw.get("platform") or "unknown")[:200]
+                source_name = str(raw.get("platform_name") or source_id)[:300]
+                source_time = parse_source_time(raw.get("timestamp"))
+                summary = ""
+                platform = source_name
+            published_at = source_time.isoformat() if source_time else None
+            url = canonical_url(str(raw.get("url") or raw.get("mobileUrl") or ""))
+            identity = url or f"{source_id}|{title.casefold()}|{published_at}"
+            external_id = hashlib.sha256(f"{kind}|{identity}".encode()).hexdigest()
+            content_hash = hashlib.sha256(f"{title.casefold()}|{summary}".encode()).hexdigest()
+            normalised.append({
+                "id": secrets.token_hex(12),
+                "external_id": external_id,
+                "source_kind": kind,
+                "source_id": source_id,
+                "source_name": source_name,
+                "platform": platform,
+                "title": title[:1000],
+                "url": url[:2000],
+                "author": str(raw.get("author") or "")[:500],
+                "summary": summary,
+                "published_at": published_at,
+                "fetched_at": utc_now(),
+                "content_hash": content_hash,
+                "raw_payload": json_text(raw),
+            })
+        return normalised
+
+    async def sync_source_entries(self) -> dict[str, int]:
+        if not self.trendradar_mcp_url:
+            raise ValueError("TRENDRADAR_MCP_URL未配置")
+        async with self.source_sync_lock:
+            config = self.get_config()
+            attempted_at = utc_now()
+            self._update_source_sync_state(
+                status="running", last_attempt_at=attempted_at, error=""
+            )
+            try:
+                days = min(30, max(1, (int(config["lookback_hours"]) + 23) // 24))
+                rss = await self._call_mcp_tool(
+                    "get_latest_rss",
+                    {"days": days, "limit": 500, "include_summary": True},
+                )
+                if rss.get("success") is False:
+                    raise RuntimeError(str(rss.get("error") or "TrendRadar RSS查询失败"))
+                entries = self._source_items("rss", rss)
+                if config.get("source_include_hotlists"):
+                    hotlists = await self._call_mcp_tool(
+                        "get_latest_news", {"limit": 1000, "include_url": True}
+                    )
+                    if hotlists.get("success") is not False:
+                        entries.extend(self._source_items("hotlist", hotlists))
+                inserted = 0
+                cutoff = (datetime.now(timezone.utc) - timedelta(
+                    days=int(config["source_retention_days"])
+                )).isoformat()
+                with self._connect() as db:
+                    for entry in entries:
+                        inserted += max(0, db.execute(
+                            """INSERT OR IGNORE INTO source_entries
+                               (id,external_id,source_kind,source_id,source_name,platform,title,url,
+                                author,summary,published_at,fetched_at,content_hash,raw_payload)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            tuple(entry[key] for key in (
+                                "id", "external_id", "source_kind", "source_id", "source_name",
+                                "platform", "title", "url", "author", "summary", "published_at",
+                                "fetched_at", "content_hash", "raw_payload",
+                            )),
+                        ).rowcount)
+                    db.execute("DELETE FROM source_entries WHERE fetched_at < ?", (cutoff,))
+                self._update_source_sync_state(
+                    status="succeeded",
+                    last_success_at=utc_now(),
+                    error="",
+                    fetched_count=len(entries),
+                    inserted_count=inserted,
+                )
+                return {"fetched": len(entries), "inserted": inserted}
+            except Exception as exc:
+                self._update_source_sync_state(status="failed", error=safe_error(exc))
+                raise
+
+    def source_state(self) -> dict[str, Any]:
+        with self._connect() as db:
+            sync = db.execute("SELECT * FROM source_sync_state WHERE id=1").fetchone()
+            rows = db.execute(
+                """SELECT source_id,source_name,source_kind,COUNT(*) AS item_count,
+                          MAX(COALESCE(published_at,fetched_at)) AS last_item_at,
+                          MAX(fetched_at) AS last_fetched_at
+                   FROM source_entries GROUP BY source_id,source_name,source_kind
+                   ORDER BY last_item_at DESC"""
+            ).fetchall()
+            total = db.execute("SELECT COUNT(*) FROM source_entries").fetchone()[0]
+            recent = db.execute(
+                "SELECT COUNT(*) FROM source_entries WHERE fetched_at>=?",
+                ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),),
+            ).fetchone()[0]
+        return {
+            "configured": bool(self.trendradar_mcp_url),
+            "syncing": bool(self.source_sync_task and not self.source_sync_task.done()),
+            "sync": dict(sync) if sync else {"status": "idle"},
+            "sources": [dict(row) for row in rows],
+            "total_entries": total,
+            "recent_entries": recent,
+        }
+
+    def list_source_entries(
+        self,
+        limit: int = 200,
+        *,
+        source_id: str | None = None,
+        lookback_hours: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if source_id:
+            clauses.append("source_id=?")
+            values.append(source_id)
+        if lookback_hours:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+            clauses.append("fetched_at>=?")
+            values.append(cutoff)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(min(5000, max(1, limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                f"""SELECT id,external_id,source_kind,source_id,source_name,platform,title,url,
+                           author,summary,published_at,fetched_at,content_hash
+                    FROM source_entries {where}
+                    ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT ?""",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_source_entry(self, entry_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT id,external_id,source_kind,source_id,source_name,platform,title,url,
+                          author,summary,published_at,fetched_at,content_hash
+                   FROM source_entries WHERE id=?""",
+                (entry_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def create_run(self, trigger_type: str) -> str:
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
@@ -423,16 +735,139 @@ class TrendService:
             finally:
                 self.active_run_id = None
 
+    @staticmethod
+    def _source_title_tokens(title: str) -> set[str]:
+        aliases = {"quake": "earthquake", "quakes": "earthquake", "u.s": "us"}
+        tokens = []
+        for token in re.findall(r"[a-z0-9]+", title.casefold()):
+            token = aliases.get(token, token)
+            if len(token) > 1 and token not in SOURCE_STOP_WORDS:
+                tokens.append(token)
+        return set(tokens)
+
+    @classmethod
+    def _cluster_source_entries(cls, entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        clusters: list[dict[str, Any]] = []
+        # ponytail: O(n^2) is bounded by the 500-entry MCP page; use embeddings only beyond that ceiling.
+        for entry in entries:
+            tokens = cls._source_title_tokens(entry["title"])
+            match = None
+            for cluster in clusters:
+                shared = len(tokens & cluster["tokens"])
+                smaller = min(len(tokens), len(cluster["tokens"]))
+                if smaller and shared >= 3 and shared / smaller >= 0.6:
+                    match = cluster
+                    break
+            if match:
+                match["entries"].append(entry)
+            else:
+                clusters.append({"tokens": tokens, "entries": [entry]})
+        return [
+            item["entries"] for item in sorted(
+                clusters,
+                key=lambda item: (
+                    len({entry["source_id"] for entry in item["entries"]}),
+                    str(item["entries"][0].get("published_at") or item["entries"][0]["fetched_at"]),
+                ),
+                reverse=True,
+            )
+        ]
+
+    @staticmethod
+    def _source_cluster_prompt(clusters: list[dict[str, Any]]) -> str:
+        return f"""You annotate clusters of overseas-media source entries for an inclusive social-trend pool.
+
+Return exactly one item for every cluster_id. Translate the event/topic title into Chinese, write a concise factual Chinese summary, explain why the cluster matters now, assign a broad category and region, and record risk flags. Do not omit politics, public figures, brands, disasters, controversy, violence, adult discussion, or topics with low visual value. Do not select products or write image prompts. Never invent facts or evidence. Return strict JSON only.
+
+Clusters:
+{json.dumps(clusters, ensure_ascii=False)}
+
+Schema:
+{{"trends":[{{"cluster_id":"cluster-1","topic_en":"factual topic","topic_zh":"中文标题","summary_zh":"事实摘要","why_trending":"传播原因","region":"Global","category":"news","risk_flags":[]}}]}}"""
+
+    async def _raw_trends_from_source_entries(
+        self, entries: list[dict[str, Any]], config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        clusters = self._cluster_source_entries(entries)
+        annotated: dict[str, dict[str, Any]] = {}
+        batch_size = int(config["candidate_count"])
+        for offset in range(0, len(clusters), batch_size):
+            compact = []
+            for index, cluster in enumerate(clusters[offset:offset + batch_size], offset + 1):
+                compact.append({
+                    "cluster_id": f"cluster-{index}",
+                    "entries": [{
+                        "title": entry["title"],
+                        "source": entry["source_name"],
+                        "published_at": entry["published_at"],
+                        "summary": entry["summary"][:1000],
+                    } for entry in cluster[:20]],
+                })
+            try:
+                response = await self._call_gemini(
+                    self._source_cluster_prompt(compact),
+                    config["gemini_discovery_model"],
+                    attempts=2,
+                )
+                payload = extract_json_object(response)
+                for item in payload.get("trends", []):
+                    if isinstance(item, dict) and item.get("cluster_id"):
+                        annotated[str(item["cluster_id"])] = item
+            except Exception as exc:
+                logger.warning("Source cluster annotation batch failed: %s", safe_error(exc))
+
+        raw_trends = []
+        for index, cluster in enumerate(clusters, 1):
+            note = annotated.get(f"cluster-{index}", {})
+            representative = cluster[0]
+            source_names = list(dict.fromkeys(entry["source_name"] for entry in cluster))
+            source_count = len(set(entry["source_id"] for entry in cluster))
+            published = [parse_source_time(entry["published_at"]) for entry in cluster]
+            first_seen = min((item for item in published if item), default=None)
+            evidence = [{
+                "source_type": entry["source_kind"],
+                "platform": entry["source_name"],
+                "title": entry["title"],
+                "url": entry["url"],
+                "published_at": entry["published_at"],
+            } for entry in cluster if entry["url"]]
+            raw_trends.append({
+                "topic_en": str(note.get("topic_en") or representative["title"]),
+                "topic_zh": str(note.get("topic_zh") or representative["title"]),
+                "summary_zh": str(note.get("summary_zh") or representative["summary"] or representative["title"]),
+                "why_trending": str(note.get("why_trending") or f"由{source_count}个独立外媒来源在当前窗口内报道"),
+                "platforms": source_names,
+                "region": str(note.get("region") or "Global"),
+                "category": str(note.get("category") or "news"),
+                "first_seen_at": first_seen.isoformat() if first_seen else representative["published_at"],
+                "engagement_signal": f"{len(cluster)} entries from {source_count} sources",
+                "evidence": evidence,
+                "confidence": min(0.98, 0.6 + max(0, source_count - 1) * 0.08),
+                "visual_brief_en": "",
+                "risk_flags": note.get("risk_flags") if isinstance(note.get("risk_flags"), list) else [],
+            })
+        return self._normalise_candidates({"trends": raw_trends}, None)
+
     async def _acquire_raw_trends(self, run_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
         self._update_run(run_id, status="running", stage="acquisition", error="")
-        discovery_text = await self._call_gemini(
-            self._discovery_prompt(config), config["gemini_discovery_model"], attempts=3
-        )
-        candidates = self._normalise_candidates(
-            extract_json_object(discovery_text), config["candidate_count"]
-        )
+        if self.trendradar_mcp_url:
+            await self.sync_source_entries()
+            entries = self.list_source_entries(
+                5000, lookback_hours=int(config["lookback_hours"])
+            )
+            if not entries:
+                raise ValueError("TrendRadar来源条目池为空，请先配置并运行外媒RSS采集")
+            candidates = await self._raw_trends_from_source_entries(entries, config)
+            discovery_text = json_text({"trends": candidates})
+        else:
+            discovery_text = await self._call_gemini(
+                self._discovery_prompt(config), config["gemini_discovery_model"], attempts=3
+            )
+            candidates = self._normalise_candidates(
+                extract_json_object(discovery_text), config["candidate_count"]
+            )
         if not candidates:
-            raise ValueError("Gemini没有返回可解析的原始热点")
+            raise ValueError("没有形成可解析的原始热点")
         self._update_run(
             run_id,
             raw_discovery=discovery_text,
@@ -447,27 +882,33 @@ class TrendService:
             row = db.execute("SELECT raw_discovery FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row or not row["raw_discovery"]:
             raise ValueError("原始热点为空，请先获取热点")
-        candidates = self._normalise_candidates(
-            extract_json_object(row["raw_discovery"]), config["candidate_count"]
-        )
+        candidates = self._normalise_candidates(extract_json_object(row["raw_discovery"]), None)
         self._update_run(run_id, status="running", stage="classification", error="")
-        verification_text = await self._call_gemini(
-            self._classification_prompt(config, candidates),
-            config["gemini_verification_model"],
-            attempts=2,
-        )
-        payload = extract_json_object(verification_text)
-        if not isinstance(payload.get("classified_trends"), list):
-            raise ValueError("Gemini没有返回可解析的可用图案池")
-        trends = self._normalise_candidates(
-            {"trends": payload["classified_trends"]}, config["candidate_count"] * 3
-        )
+        raw_responses = []
+        trends = []
+        batch_size = int(config["candidate_count"])
+        for offset in range(0, len(candidates), batch_size):
+            batch = candidates[offset:offset + batch_size]
+            verification_text = await self._call_gemini(
+                self._classification_prompt(config, batch),
+                config["gemini_verification_model"],
+                attempts=2,
+            )
+            raw_responses.append(verification_text)
+            payload = extract_json_object(verification_text)
+            if not isinstance(payload.get("classified_trends"), list):
+                raise ValueError("Gemini没有返回可解析的可用图案池")
+            trends.extend(self._normalise_candidates(
+                {"trends": payload["classified_trends"]}, None
+            ))
+        for rank, trend in enumerate(trends, 1):
+            trend["rank"] = rank
         trends = self._trend_pool_entries(trends)
         self._replace_trends(run_id, trends)
         usable = [item for item in trends if item["status"] == "ready"]
         self._update_run(
             run_id,
-            raw_verification=verification_text,
+            raw_verification="\n".join(raw_responses),
             verified_count=len(usable),
             status="trend_pool_ready" if usable else "failed",
             stage="trend_pool" if usable else "finished",
@@ -492,15 +933,20 @@ class TrendService:
         if not trends:
             raise ValueError("没有待生成提示词的可用图案")
         self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
-        response_text = await self._call_gemini(
-            self._prompt_pool_prompt(trends), config["gemini_verification_model"], attempts=2
-        )
-        payload = extract_json_object(response_text)
-        supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
-        supplied_map = {
-            str(item.get("trend_id")): str(item.get("prompt") or "").strip()
-            for item in supplied if isinstance(item, dict)
-        }
+        supplied_map = {}
+        batch_size = int(config["candidate_count"])
+        for offset in range(0, len(trends), batch_size):
+            response_text = await self._call_gemini(
+                self._prompt_pool_prompt(trends[offset:offset + batch_size]),
+                config["gemini_verification_model"],
+                attempts=2,
+            )
+            payload = extract_json_object(response_text)
+            supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
+            supplied_map.update({
+                str(item.get("trend_id")): str(item.get("prompt") or "").strip()
+                for item in supplied if isinstance(item, dict)
+            })
         prompt_ids = []
         with self._connect() as db:
             for trend in trends:
@@ -814,12 +1260,15 @@ Schema:
 {{"prompts":[{{"trend_id":"id","prompt":"complete English image prompt"}}]}}"""
 
     @staticmethod
-    def _normalise_candidates(payload: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    def _normalise_candidates(
+        payload: dict[str, Any], limit: int | None
+    ) -> list[dict[str, Any]]:
         trends = payload.get("trends")
         if not isinstance(trends, list):
             return []
         result = []
-        for index, raw in enumerate(trends[:limit], start=1):
+        selected = trends if limit is None else trends[:limit]
+        for index, raw in enumerate(selected, start=1):
             if not isinstance(raw, dict):
                 continue
             topic_en = str(raw.get("topic_en") or "").strip()
@@ -834,12 +1283,12 @@ Schema:
                 "topic_zh": topic_zh[:300],
                 "summary_zh": str(raw.get("summary_zh") or "")[:2000],
                 "why_trending": str(raw.get("why_trending") or "")[:2000],
-                "platforms": string_list(raw.get("platforms"), limit=20, item_limit=50),
+                "platforms": string_list(raw.get("platforms"), limit=100, item_limit=100),
                 "region": str(raw.get("region") or "")[:200],
                 "category": str(raw.get("category") or "other")[:100],
                 "first_seen_at": raw.get("first_seen_at"),
                 "engagement_signal": raw.get("engagement_signal"),
-                "evidence": evidence[:10],
+                "evidence": evidence[:100],
                 "confidence": confidence(raw.get("confidence")),
                 "visual_brief_en": str(raw.get("visual_brief_en") or "")[:3000],
                 "risk_flags": string_list(raw.get("risk_flags"), limit=20, item_limit=100),
@@ -1001,7 +1450,7 @@ Requirements:
         if result.get("raw_discovery"):
             try:
                 result["raw_trends"] = self._normalise_candidates(
-                    extract_json_object(result["raw_discovery"]), 30
+                    extract_json_object(result["raw_discovery"]), None
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 logger.warning("Run %s contains an unreadable raw discovery response", run_id)
@@ -1030,6 +1479,11 @@ Requirements:
                 (today,),
             ).fetchone()
             platforms = db.execute("SELECT platforms FROM trends WHERE status != 'rejected'").fetchall()
+            source_total = db.execute("SELECT COUNT(*) FROM source_entries").fetchone()[0]
+            source_recent = db.execute(
+                "SELECT COUNT(*) FROM source_entries WHERE fetched_at>=?",
+                ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),),
+            ).fetchone()[0]
         platform_counts: dict[str, int] = {}
         for row in platforms:
             for platform in json.loads(row["platforms"]):
@@ -1046,6 +1500,10 @@ Requirements:
                 {"name": name, "count": count}
                 for name, count in sorted(platform_counts.items(), key=lambda item: (-item[1], item[0]))
             ],
+            "sources": {
+                "total_entries": source_total,
+                "recent_entries": source_recent,
+            },
         }
 
     async def _scheduler_loop(self) -> None:
@@ -1056,6 +1514,10 @@ Requirements:
                 generation_interval = int(config["generation_interval_minutes"])
                 acquisition_enabled = bool(config.get("enabled"))
                 generation_enabled = bool(config.get("auto_generate"))
+                source_sync_interval = int(config["source_sync_interval_minutes"])
+                source_sync_enabled = bool(
+                    config.get("source_sync_enabled") and self.trendradar_mcp_url
+                )
                 now = time.monotonic()
                 if self._acquisition_interval != acquisition_interval or self._acquisition_enabled != acquisition_enabled:
                     self._acquisition_interval = acquisition_interval
@@ -1065,6 +1527,13 @@ Requirements:
                     self._generation_interval = generation_interval
                     self._generation_enabled = generation_enabled
                     self._next_generation_at = now + generation_interval * 60
+                if self._source_sync_interval != source_sync_interval or self._source_sync_enabled != source_sync_enabled:
+                    self._source_sync_interval = source_sync_interval
+                    self._source_sync_enabled = source_sync_enabled
+                    self._next_source_sync_at = now + source_sync_interval * 60
+                if source_sync_enabled and now >= self._next_source_sync_at:
+                    if self.launch_source_sync():
+                        self._next_source_sync_at = now + source_sync_interval * 60
                 if acquisition_enabled and now >= self._next_acquisition_at:
                     run_id = self.launch_full_pipeline(
                         trigger_type="scheduled",

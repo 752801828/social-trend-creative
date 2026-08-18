@@ -72,6 +72,10 @@ class ConfigUpdate(BaseModel):
     generation_concurrency: int | None = Field(default=None, ge=1, le=5)
     auto_generate: bool | None = None
     notify_enabled: bool | None = None
+    source_sync_enabled: bool | None = None
+    source_sync_interval_minutes: int | None = Field(default=None, ge=5, le=1440)
+    source_retention_days: int | None = Field(default=None, ge=1, le=365)
+    source_include_hotlists: bool | None = None
 
 
 class PoolRequest(BaseModel):
@@ -84,6 +88,8 @@ async def index():
 
 
 @app.get("/acquire")
+@app.get("/sources")
+@app.get("/signals")
 @app.get("/trends")
 @app.get("/prompts")
 @app.get("/images")
@@ -104,8 +110,41 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
         "dashboard": service.dashboard(),
         "runs": service.list_runs(limit),
+        "source_state": service.source_state(),
         "update": read_update_status(),
     }
+
+
+@app.get("/api/sources", dependencies=[Depends(require_admin)])
+async def sources():
+    return service.source_state()
+
+
+@app.post("/api/sources/sync", dependencies=[Depends(require_admin)], status_code=202)
+async def sync_sources():
+    try:
+        launched = service.launch_source_sync()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="外媒来源同步已在运行")
+    return {"status": "accepted"}
+
+
+@app.get("/api/signals", dependencies=[Depends(require_admin)])
+async def signals(
+    limit: int = Query(default=200, ge=1, le=1000),
+    source_id: str | None = Query(default=None, max_length=200),
+):
+    return {"entries": service.list_source_entries(limit, source_id=source_id)}
+
+
+@app.get("/api/signals/{entry_id}", dependencies=[Depends(require_admin)])
+async def signal(entry_id: str):
+    entry = service.get_source_entry(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="来源条目不存在")
+    return entry
 
 
 @app.get("/api/system/update", dependencies=[Depends(require_admin)])

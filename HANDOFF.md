@@ -29,20 +29,21 @@ git log -5 --oneline
 
 ## 当前架构
 
-系统是四个彼此独立、可单独触发的阶段：
+系统由独立来源同步和四个创作阶段组成：
 
-1. 热点获取：Gemini 在配置数量内获取全球所有类型原始社媒热点，不按产品适配、视觉潜力、品牌、人物或敏感类型过滤；仅事实化记录并标记风险。
-2. 图案提取：从原始热点提取安全、原创、可复用、与产品无关的视觉图案方向，写入可用图案池 `trends`；一个热点可以产生零个、一个或多个图案。
-3. 提示词生成：为同一轮次全部尚未处理的可用图案逐条生成对应产品效果图提示词，写入 `prompt_pool`；不随机抽样、不重复已有图案。
-4. 生图：随机抽取 `prompt_pool` 条目交给 Flow，把图案直接生成在产品上，图片记录保存对应 `prompt_id`。
+1. 来源同步：通过 TrendRadar Streamable HTTP MCP 幂等保存 RSS/可选热榜条目到 `source_entries`；RSSHub 只负责向 TrendRadar 提供可订阅路由。
+2. 热点获取：将查询窗口内全部来源条目按事件聚类，Gemini 分批翻译、分类并标记风险，形成全类型原始热点。
+3. 图案提取：从全部原始热点分批提取安全、原创、可复用、与产品无关的视觉图案方向，写入 `trends`。
+4. 提示词生成：为全部尚未处理的可用图案逐条生成产品效果图提示词，写入 `prompt_pool`。
+5. 生图：随机抽取 `prompt_pool` 条目交给 Flow，把图案直接生成在产品上，图片记录保存对应 `prompt_id`。
 
 核心关系为：
 
 ```text
-Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
+Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 ```
 
-点击“获取热点”会在同一轮次依次完成前三阶段。只有第四阶段随机抽取；提示词池条目可以重复用于多次生图，`used_count` 记录使用次数。已形成可用图案池后禁止重新提取，因为替换该池会级联影响现有提示词和图片。
+来源同步不创建任务。点击“获取热点”会同步来源并在同一任务中建立热点、图案和提示词三池。只有生图随机抽取；提示词池条目可以重复用于多次生图，`used_count` 记录使用次数。
 
 ## 业务边界
 
@@ -50,7 +51,7 @@ Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 - “热点来源平台”是信号来源，不是图片发布渠道或目标平台。
 - 来源 URL 和发布时间为可选参考，不是流水线门禁；不得伪造来源。
 - 不设最终最多保留热点数量；不能因 `Exceeds the maximum accepted limit of 5 trends` 拒绝原始热点。
-- 第一阶段在 `candidate_count` 范围内采集全类型热点，不因品牌、人物、政治、争议、成人讨论、赌博、仇恨或暴力类型直接遗漏；敏感内容只做高层事实记录并标记风险。
+- `candidate_count` 仅为 Gemini 聚类注释、图案提取和提示词生成的批处理大小，不是热点总数上限。
 - 第二阶段只输出可安全原创化的图案方向；无法脱离商标、版权角色、真人肖像、仇恨符号、成人/暴力表达或错误信息的方向不得进入可用图案池。
 - 第三阶段可选择杯子、随行杯、手机壳、T 恤、卫衣、帆布袋、抱枕、毯子、备胎罩、贴纸、海报或其他可印刷物品。
 - 图案必须自然服从物品曲面、褶皱、接缝、材质、位置和比例；每个提示词只生成一个主要物品。
@@ -64,9 +65,10 @@ Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 - `completed` / `partial` / `failed` / `cancelled`：生图或阶段最终结果。
 - `ready`：可用图案池或提示词池条目可用。
 - 任一时刻只允许一个阶段任务运行，冲突返回 HTTP `409`。
-- 手动“获取热点”固定运行前三阶段，“一键完整流水线”固定运行四阶段。
+- 手动“获取热点”固定建立三池，“一键完整流水线”继续随机产品生图。
 - 热点获取和随机生图拥有独立间隔；`enabled` 控制前三阶段任务，`auto_generate` 控制定时随机生图。间隔允许 15–1440 分钟，服务重启后从当前时间周期继续，不集中补跑。
 - 调度和定时自动生图默认均关闭。
+- 来源同步拥有独立开关和间隔，默认关闭、默认 10 分钟；来源条目默认保留 30 天，热榜导入默认关闭。
 
 ## 当前默认策略
 
@@ -76,7 +78,7 @@ Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 - 回溯窗口：24 小时
 - 地区：美国、英国、欧洲、全球英语区（优先覆盖）
 - 来源平台：X、TikTok、Instagram、YouTube、Reddit
-- 全类型原始热点数：10
+- AI 批处理大小：10，不限制最终热点总数
 - 每轮随机生图数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
 - Gemini 获取模型：`gemini-pro-thinking`
 - Gemini 分类/提示词模型：`gemini-flash`
@@ -88,9 +90,9 @@ Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
 
 ## 主要文件
 
-- `app/main.py`：FastAPI、Bearer 鉴权和四阶段管理 API。
-- `app/service.py`：配置、SQLite、四阶段服务、Flow 调用、调度、安全筛选和飞书通知。
-- `static/index.html`：四阶段管理页、轮次详情、提示词池和图片放大。
+- `app/main.py`：FastAPI、Bearer 鉴权、来源池和创作流水线 API。
+- `app/service.py`：TrendRadar MCP、SQLite、事件聚类、Gemini/Flow 调用、调度、安全筛选和飞书通知。
+- `static/index.html`：来源、来源条目、三池、生图、详情和图片放大界面。
 - `tests/test_service.py`：解析、阶段隔离、提示词池消费、取消恢复和鉴权隔离测试。
 - `CONTEXT.md`：领域术语和统一命名。
 - `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：必须持续更新的架构总览与变更日志。
@@ -121,6 +123,8 @@ Authorization: Bearer <ADMIN_KEY>
 ## 管理页面
 
 - `/`：全局总览、统计、连接、设置和一键完整流水线。
+- `/sources`：外媒来源、条目数量、最后内容与同步时间。
+- `/signals`：按发布日期倒序展示来源条目，可按来源筛选；点击只打开该条目。
 - `/acquire`、`/trends`、`/prompts`、`/images` 均直接展示跨任务内容卡片，按内容日期倒序排列，无需先选轮次。
 - 点击任意内容卡片只打开对应热点、图案、提示词或图片，顶部同时显示所属任务摘要；图片本身仍可单独点击放大。
 - 任务详情可补齐中断的图案或提示词阶段，并可为随机生图手动指定 1–30 张。
@@ -146,6 +150,7 @@ GEMINI_BASE_URL=http://host.docker.internal:5918
 GEMINI_API_KEY=<Gemini2API Key>
 FLOW_BASE_URL=http://host.docker.internal:38000
 FLOW_API_KEY=<Flow2API Key>
+TRENDRADAR_MCP_URL=http://host.docker.internal:3333/mcp
 PUBLIC_BASE_URL=
 FEISHU_WEBHOOK_URL=
 FEISHU_SIGNING_SECRET=
@@ -153,7 +158,7 @@ DATA_DIR=/app/data
 PORT=5920
 ```
 
-真实密钥不得写入代码、日志、文档、测试或 Git。
+真实密钥不得写入代码、日志、文档、测试或 Git。TrendRadar MCP 服务机地址为 `http://127.0.0.1:3333/mcp`，Docker 内必须使用 `host.docker.internal`。
 
 ## 验证与部署
 
@@ -193,11 +198,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 
 ## 当前完成状态
 
-- 四阶段后端服务、独立接口和一键完整流水线已完成。
+- TrendRadar MCP 来源同步、来源条目池、事件聚类和四阶段创作流水线已完成。
 - 全类型原始热点、可用图案池、提示词池和生成记录已分开持久化。
 - 全量图案对应提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
-- 管理页已拆成总览和四个独立 URL 模块，可按轮次查看全部热点、可用图案池、提示词池和生图池；整体使用 StyleKit 日系清新风。
+- 管理页已拆成总览、外媒来源、来源条目和四个创作池 URL 模块；整体使用 StyleKit 日系清新风。
 - 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
-- 当前测试共 22 项。
+- 当前测试以仓库最新 `python -m unittest discover -s tests -v` 结果为准。
 
 新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。
