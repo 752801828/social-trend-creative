@@ -463,6 +463,15 @@ class StaticPageTests(unittest.TestCase):
         self.assertNotIn("sessionStorage", self.html)
         self.assertNotIn("document.cookie", self.html)
 
+    def test_related_service_frontends_are_linked_by_current_host(self):
+        self.assertIn("关联服务", self.html)
+        self.assertIn("检测上游服务", self.html)
+        for name, port in (("TrendRadar", "8080"), ("RSSHub", "1200"), ("NewsNow", "4444")):
+            self.assertIn(name, self.html)
+            self.assertIn(f'data-service-port="{port}"', self.html)
+        self.assertIn("url.port=link.dataset.servicePort", self.html)
+        self.assertIn('target="_blank"', self.html)
+
     def test_project_update_button_uses_the_update_api(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('id="updateBtn"', self.html)

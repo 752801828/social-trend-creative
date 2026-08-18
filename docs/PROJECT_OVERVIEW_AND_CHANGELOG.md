@@ -131,6 +131,7 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 设置弹窗加入来源同步、同步间隔、保留天数和热榜导入；来源/条目页可直接手动同步，连接检测同时报告 TrendRadar、Gemini 和 Flow。
 - `.env.example` 增加 Docker 到宿主机 MCP 地址 `http://host.docker.internal:3333/mcp`，依赖增加 `mcp>=1.16,<2`。
 - 新增领域词汇 Source entry、Source cluster、Source sync 和 Feed-backed acquisition，并记录 ADR `docs/adr/0001-trendradar-mcp-source-boundary.md`，明确 MCP 是唯一 TrendRadar 数据边界。
-- 新增来源同步幂等、跨媒体同事件聚类、来源/条目界面和来源设置回归检查；当前自动化测试共 26 项。
+- 新增来源同步幂等、跨媒体同事件聚类、来源/条目界面、来源设置和关联服务入口回归检查；当前自动化测试共 27 项。
 - 根据实际内网使用方式移除 `ADMIN_KEY`、Bearer 请求头和所有 FastAPI 管理路由鉴权依赖；页面初始化后自动调用 `/api/state`，顶部只显示自动连接状态。
 - `.env.example` 不再要求管理密钥；README 和交接文档明确 `5920` 不得直接暴露公网，公网使用时须由反向代理提供认证、访问控制和 HTTPS。
+- 管理页新增 TrendRadar、RSSHub、NewsNow 关联服务入口，自动使用当前页面主机名和 `8080`、`1200`、`4444` 端口；“测试连接”更名为“检测上游服务”，避免与已移除的 Key 登录操作混淆。
