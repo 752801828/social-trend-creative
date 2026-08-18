@@ -138,3 +138,5 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 根据部署取舍取消 RSSHub：管理页移除 `:1200` 入口，现行架构、领域词汇和 ADR 收敛为 TrendRadar 直接采集外媒原生 RSS；NewsNow 保留为独立人工浏览入口。
 - README 新增 TrendRadar `rss.feeds` 外媒起始清单及代理配置；容器访问 Windows 宿主机代理必须使用 `host.docker.internal`，外媒无法直连时不得配置为容器自身的 `127.0.0.1`。
 - 采用 `plenaryapp/awesome-rss-feeds` 作为外媒选源目录，将 TrendRadar 起始清单调整为“美国优先、全球补充”的 30 个分组核心源，其中 24 个为美国媒体或美国市场导向栏目，覆盖新闻、商业、科技、文化、时尚、设计、科学、体育和网络文化；明确 OPML 不整包导入，并补充增量扩源、失败源淘汰、手动采集及来源池验证命令。
+- README 增加 TrendRadar 原生 AI 与飞书部署配置：采用“美国 RSS 为主、中文热榜补充”，让 AI 联合分析中文热榜与美国优先 RSS，复用宿主机 Gemini2API 的 OpenAI 兼容端点，并使用 `night_owl` 每日两个窗口各分析推送一次；Webhook 和 AI Key 仅保存在服务机 `D:\TrendRadar\docker\.env`，不进入 Git。
+- 已将不含密钥的 TrendRadar 默认配置直接提交到 `752801828/TrendRadar@822ce07`：启用 11 个中文热榜、30 个美国优先 RSS、RSS AI 分析、中文翻译和 `night_owl` 调度；飞书 Webhook 继续由服务机环境变量注入。

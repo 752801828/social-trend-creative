@@ -233,6 +233,82 @@ curl.exe -X POST http://localhost:5920/api/sources/sync
 curl.exe http://localhost:5920/api/sources
 ```
 
+### TrendRadar 原生 AI 分析与飞书
+
+TrendRadar 的原生 AI 报告只用于人工查看和飞书通知；Social Trend Creative 仍使用自己的 Gemini 流水线生成热点池、图案池和提示词池，两者互不替代。配置采用“美国 RSS 为主、中文热榜补充”，在 `D:\TrendRadar\config\config.yaml` 的现有段落中修改下列字段，不要追加重复的顶层配置：
+
+上述非敏感默认配置已提交到 [`752801828/TrendRadar@822ce07`](https://github.com/752801828/TrendRadar/commit/822ce07)；服务机拉取 `master` 后只需在私有 `docker\.env` 中填写 AI Key 和飞书 Webhook。
+
+```yaml
+schedule:
+  enabled: true
+  preset: "night_owl"
+
+platforms:
+  enabled: true
+
+rss:
+  enabled: true
+
+display:
+  regions:
+    hotlist: true
+    new_items: false
+    rss: true
+    standalone: false
+    ai_analysis: true
+
+notification:
+  enabled: true
+  channels:
+    feishu:
+      webhook_url: ""
+
+ai_analysis:
+  enabled: true
+  language: "Chinese"
+  mode: "follow_report"
+  max_news_for_analysis: 150
+  include_rss: true
+  include_standalone: false
+  include_rank_timeline: false
+
+ai_translation:
+  enabled: true
+  language: "中文"
+  scope:
+    hotlist: false
+    rss: true
+    standalone: false
+```
+
+`night_owl` 使用 `Asia/Shanghai` 时区：每天 `15:00–17:00` 做一次当前热点分析，`22:00–01:00` 做一次全天汇总；两个窗口均只分析和推送一次，其他时间继续采集但不打扰。TrendRadar 每 30 分钟唤醒一次即可命中上述窗口。
+
+编辑服务机 `D:\TrendRadar\docker\.env`，复用 Social Trend Creative 已在使用的 Gemini2API Key，并填入飞书群自定义机器人的 Webhook。下面的值不得提交 Git：
+
+```env
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/<飞书机器人Webhook>
+AI_ANALYSIS_ENABLED=true
+AI_API_KEY=<与social-trend-creative的GEMINI_API_KEY相同>
+AI_MODEL=openai/gemini-flash
+AI_API_BASE=http://host.docker.internal:5918/v1
+CRON_SCHEDULE=*/30 * * * *
+RUN_MODE=cron
+IMMEDIATE_RUN=true
+```
+
+TrendRadar 原生飞书渠道只读取 Webhook，不读取 `FEISHU_SIGNING_SECRET`。飞书机器人应使用关键词或 IP 白名单安全策略；如果启用了签名校验，原生推送会失败。多个群的 Webhook 用半角分号 `;` 分隔。
+
+`.env` 变化必须重建容器才能进入环境，单独执行 `restart` 不会更新这些变量。服务机执行：
+
+```cmd
+cd /d D:\TrendRadar\docker
+docker compose up -d --force-recreate --no-deps --pull never trendradar
+docker logs --tail 300 trendradar
+```
+
+下一个 `night_owl` 时间窗口会生成 AI 报告并推送飞书。需要立即验证时，可暂时把 `schedule.enabled` 改为 `false`，执行一次 `docker exec trendradar python manage.py run`，确认收到消息后再恢复为 `true`；测试期间仍会使用相同的 RSS、AI 和通知总开关。
+
 ### 网页一键更新
 
 首次部署本功能后，在服务机用当前拥有 GitHub 拉取权限、且能运行 Docker Desktop 的 Windows 用户执行一次：
