@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
@@ -28,6 +29,30 @@ class TrendServiceTests(unittest.TestCase):
 
     def test_extracts_json_from_fenced_response(self):
         self.assertEqual(extract_json_object('```json\n{"trends": []}\n```'), {"trends": []})
+
+    def test_extracts_json_with_unescaped_control_character(self):
+        self.assertEqual(
+            extract_json_object('{"summary":"first\nsecond"}'),
+            {"summary": "first\nsecond"},
+        )
+
+    def test_gemini_retries_malformed_json(self):
+        async def exercise():
+            responses = iter(("{invalid}", '{"trends": []}'))
+
+            async def handler(_request):
+                content = next(responses)
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": content}}]},
+                )
+
+            await self.service.http.aclose()
+            self.service.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            return await self.service._call_gemini("prompt", "model", attempts=2)
+
+        with mock.patch("app.service.asyncio.sleep", new=mock.AsyncMock()):
+            self.assertEqual(asyncio.run(exercise()), '{"trends": []}')
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
@@ -280,6 +305,25 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(entries[0]["url"], "https://example.com/quake")
         self.assertEqual(entries[0]["published_at"], "2026-08-18T10:00:00+00:00")
 
+        async def annotate():
+            async def fake_gemini(_prompt, _model, *, attempts):
+                return json.dumps({"trends": [{
+                    "cluster_id": "cluster-1",
+                    "topic_en": "Major earthquake strikes Indonesia",
+                    "topic_zh": "印度尼西亚发生强烈地震",
+                    "summary_zh": "外媒报道印度尼西亚发生强烈地震。",
+                }]})
+
+            self.service._call_gemini = fake_gemini
+            await self.service._raw_trends_from_source_entries(
+                self.service.list_source_entries(), self.service.get_config()
+            )
+
+        asyncio.run(annotate())
+        translated = self.service.list_source_entries()[0]
+        self.assertEqual(translated["title_zh"], "印度尼西亚发生强烈地震")
+        self.assertEqual(translated["summary_zh"], "外媒报道印度尼西亚发生强烈地震。")
+
     def test_source_entries_cluster_repeated_overseas_reports(self):
         entries = [
             {"title": "Powerful earthquake strikes eastern Indonesia", "source_id": "bbc", "published_at": "2", "fetched_at": "2"},
@@ -402,6 +446,11 @@ class StaticPageTests(unittest.TestCase):
             self.assertIn(label, self.html)
         self.assertIn("/api/sources/sync", self.html)
         self.assertIn("/api/signals/${encodeURIComponent(entryId)}", self.html)
+
+    def test_source_entry_cards_show_ai_chinese_translation(self):
+        self.assertIn("item.title_zh||item.title", self.html)
+        self.assertIn("item.summary_zh||item.summary", self.html)
+        self.assertIn("AI 中文翻译", self.html)
         self.assertIn("renderSourceContent", self.html)
         self.assertIn("renderSignalContent", self.html)
         self.assertIn("openSignal", self.html)

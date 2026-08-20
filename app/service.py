@@ -145,7 +145,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("Gemini响应中没有JSON对象")
-    parsed = json.loads(cleaned[start : end + 1])
+    parsed = json.loads(cleaned[start : end + 1], strict=False)
     if not isinstance(parsed, dict):
         raise ValueError("Gemini响应JSON必须是对象")
     return parsed
@@ -283,6 +283,8 @@ class TrendService:
                     url TEXT NOT NULL,
                     author TEXT NOT NULL DEFAULT '',
                     summary TEXT NOT NULL DEFAULT '',
+                    title_zh TEXT NOT NULL DEFAULT '',
+                    summary_zh TEXT NOT NULL DEFAULT '',
                     published_at TEXT,
                     fetched_at TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
@@ -306,6 +308,10 @@ class TrendService:
             generation_columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
             if "prompt_id" not in generation_columns:
                 db.execute("ALTER TABLE generations ADD COLUMN prompt_id TEXT")
+            source_columns = {row["name"] for row in db.execute("PRAGMA table_info(source_entries)")}
+            for name in ("title_zh", "summary_zh"):
+                if name not in source_columns:
+                    db.execute(f"ALTER TABLE source_entries ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if not db.execute("SELECT 1 FROM settings WHERE id = 1").fetchone():
                 db.execute(
                     "INSERT INTO settings(id, value, updated_at) VALUES(1, ?, ?)",
@@ -613,7 +619,7 @@ class TrendService:
         with self._connect() as db:
             rows = db.execute(
                 f"""SELECT id,external_id,source_kind,source_id,source_name,platform,title,url,
-                           author,summary,published_at,fetched_at,content_hash
+                           author,summary,title_zh,summary_zh,published_at,fetched_at,content_hash
                     FROM source_entries {where}
                     ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT ?""",
                 values,
@@ -624,7 +630,7 @@ class TrendService:
         with self._connect() as db:
             row = db.execute(
                 """SELECT id,external_id,source_kind,source_id,source_name,platform,title,url,
-                          author,summary,published_at,fetched_at,content_hash
+                          author,summary,title_zh,summary_zh,published_at,fetched_at,content_hash
                    FROM source_entries WHERE id=?""",
                 (entry_id,),
             ).fetchone()
@@ -817,6 +823,7 @@ Schema:
                 logger.warning("Source cluster annotation batch failed: %s", safe_error(exc))
 
         raw_trends = []
+        translations = []
         for index, cluster in enumerate(clusters, 1):
             note = annotated.get(f"cluster-{index}", {})
             representative = cluster[0]
@@ -831,6 +838,10 @@ Schema:
                 "url": entry["url"],
                 "published_at": entry["published_at"],
             } for entry in cluster if entry["url"]]
+            title_zh = str(note.get("topic_zh") or "").strip()
+            summary_zh = str(note.get("summary_zh") or "").strip()
+            if title_zh or summary_zh:
+                translations.extend((title_zh, summary_zh, entry["id"]) for entry in cluster)
             raw_trends.append({
                 "topic_en": str(note.get("topic_en") or representative["title"]),
                 "topic_zh": str(note.get("topic_zh") or representative["title"]),
@@ -846,6 +857,12 @@ Schema:
                 "visual_brief_en": "",
                 "risk_flags": note.get("risk_flags") if isinstance(note.get("risk_flags"), list) else [],
             })
+        if translations:
+            with self._connect() as db:
+                db.executemany(
+                    "UPDATE source_entries SET title_zh=?, summary_zh=? WHERE id=?",
+                    translations,
+                )
         return self._normalise_candidates({"trends": raw_trends}, None)
 
     async def _acquire_raw_trends(self, run_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1100,6 +1117,7 @@ Schema:
                 content = response.json()["choices"][0]["message"].get("content", "")
                 if not str(content).strip():
                     raise RuntimeError("Gemini返回空内容")
+                extract_json_object(str(content))
                 return str(content)
             except Exception as exc:
                 error = exc

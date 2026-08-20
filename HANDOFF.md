@@ -45,10 +45,12 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 来源同步不创建任务。点击“获取热点”会同步来源并在同一任务中建立热点、图案和提示词三池。只有生图随机抽取；提示词池条目可以重复用于多次生图，`used_count` 记录使用次数。
 
+热点聚类产生的 `topic_zh` 和 `summary_zh` 同步写回该来源簇中的 `source_entries.title_zh/summary_zh`。“原始资讯”卡片和详情优先显示中文，保留英文原标题和原文摘要；尚未参加聚类的新条目暂时显示原文，下一次获取热点时补齐。
+
 ## 业务边界
 
-- 全球搜索，配置地区只是优先覆盖，不是排他过滤。
-- “热点来源平台”是信号来源，不是图片发布渠道或目标平台。
+- 配置 TrendRadar MCP 后，新任务只使用 TrendRadar 原生 RSS/可选热榜；地区和“热点来源平台”仅供未配置 MCP 时的旧 Gemini prompt-first 回退模式使用。
+- “热点来源平台”即使在回退模式中也只表示信号来源，不是图片发布渠道或目标平台。
 - 来源 URL 和发布时间为可选参考，不是流水线门禁；不得伪造来源。
 - 不设最终最多保留热点数量；不能因 `Exceeds the maximum accepted limit of 5 trends` 拒绝原始热点。
 - `candidate_count` 仅为 Gemini 聚类注释、图案提取和提示词生成的批处理大小，不是热点总数上限。
@@ -76,8 +78,8 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 随机生图间隔：90 分钟（1.5 小时）
 - 时区：`Asia/Shanghai`
 - 回溯窗口：24 小时
-- 地区：美国为主要市场，全球英语区及少量印尼、日本来源用于补充可能影响美国市场的国际事件
-- 来源平台：X、TikTok、Instagram、YouTube、Reddit
+- 地区：当前 RSS 清单以美国媒体为主、全球英语外媒补充；仅回退模式读取地区设置
+- 来源平台：TrendRadar 配置的原生 RSS；X、TikTok、Instagram、YouTube、Reddit 仅为回退模式设置
 - AI 批处理大小：10，不限制最终热点总数
 - 每轮随机生图数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
 - Gemini 获取模型：`gemini-pro-thinking`
@@ -92,6 +94,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 - `app/main.py`：FastAPI、来源池和创作流水线 API；页面与 API 默认同源直连。
 - `app/service.py`：TrendRadar MCP、SQLite、事件聚类、Gemini/Flow 调用、调度、安全筛选和飞书通知。
+- Gemini 共用调用会先校验响应 JSON；模型返回缺少双引号、尾逗号等无效 JSON 时在既有尝试次数内自动重试，并兼容字符串中的裸控制字符，避免单个坏批次直接终止长任务。
 - `static/index.html`：来源、来源条目、三池、生图、详情和图片放大界面。
 - `tests/test_service.py`：解析、阶段隔离、提示词池消费、取消恢复和自动连接测试。
 - `CONTEXT.md`：领域术语和统一命名。
