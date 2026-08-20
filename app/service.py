@@ -1226,11 +1226,11 @@ Schema:
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Extract only original, reusable, production-safe visual pattern directions from the raw trends. A raw trend may produce zero, one, or multiple pattern entries. Split distinct motifs, merge duplicate directions, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood.
+Translate the raw trends into original, reusable, production-safe visual directions. Do not require the source event to already be an illustration, aesthetic, meme, merchandise idea, or printable subject. News events, technology, sports, culture, public discussion, and other non-visual topics can become abstract patterns, original comic-style scenes, symbolic editorial illustrations, geometric motifs, decorative emblems, playful icons, or other non-literal artwork. A raw trend may produce one or multiple pattern entries; return zero only when no safe, respectful, non-infringing visual translation is possible. Split distinct motifs, merge duplicate directions, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood.
 
 The acquisition input intentionally includes every trend type. Do not copy or retain logos, trademarks, copyrighted characters, distinctive existing artwork, public-figure likenesses, hate symbols, explicit/adult imagery, graphic violence, misinformation claims, or unsafe instructions. When a protected or sensitive trend has a meaningful generic underlying mood, shape language, color story, community feeling, or visual metaphor, extract only that non-infringing generic direction without implying endorsement or association; otherwise output no pattern for it. Missing evidence or publication time is not itself a rejection reason.
 
-Every classified_trends item is an accepted pattern-pool entry. It must preserve enough factual context to explain the inspiration, contain a concrete reusable visual motif and mood, have no unresolved risk flags, and remain independent of any physical product. Do not write the final image prompt or choose a product in this stage. Return strict JSON only.
+Every classified_trends item is an accepted pattern-pool entry. It must preserve enough factual context to explain the inspiration, contain a concrete reusable visual motif and mood, have no unresolved risk flags, and remain independent of any physical product. The artwork may interpret the event rather than depict it literally; sensitive events must use restrained, non-graphic visual metaphor and must not trivialize victims or suffering. Do not write the final image prompt or choose a product in this stage. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -1271,7 +1271,7 @@ Schema:
         ]
         return f"""You create production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Keep the safe pattern direction and category, select one suitable physical item, and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting. The final image must show the pattern already printed directly on the product, never as separate flat artwork.
+For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Turn the supplied safe direction into a finished original artwork using the most suitable visual language, such as an abstract repeat, original comic illustration, symbolic editorial graphic, geometric composition, decorative emblem, playful icon system, or stylized poster art. The source topic does not need to be inherently printable and the artwork does not need to depict the event literally. Select one suitable physical item and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting. The final image must show the artwork already printed directly on the product, never as separate flat artwork.
 
 Rules:
 1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
