@@ -45,7 +45,11 @@
 
 各视图卡片统一按内容创建日期倒序排列，不需要先选择任务；点击卡片会只打开被点击的热点、图案、提示词或图片，并在顶部附带所属任务摘要。页面打开后自动连接同源 API，不再要求输入管理密钥。
 
-界面沿用 StyleKit `Japanese Fresh（日系清新风）`，但将页面底色加深为灰绿色纸张、提高文字和边框对比度，并为内容卡片增加清晰阴影，避免大面积纯白难以辨认。
+界面采用 StyleKit `Apple 风格`：Apple 灰 `#f5f5f7` 背景、白色内容面、Apple 蓝 `#0071e3` 强调色、系统 SF Pro 字体栈、克制圆角和微妙阴影；不使用渐变背景、纸张纹理、植物装饰或外部字体。
+
+媒体源、原始资讯、全部热点、可用图案、提示词和成品图库统一采用卡片懒加载：首批只获取并渲染 24 张，滚动接近底部再从分页 API 请求下一批；轮询数据未变化时保留当前渲染进度，图片同时使用浏览器原生延迟加载和异步解码，避免一次下载或创建上千张卡片。媒体源总数很小，仍一次获取但按相同批次渲染。
+
+`/api/state` 中的任务列表只返回状态、数量和时间等摘要，不再附带每轮完整 Gemini 原始响应；用户点击具体卡片或任务时才通过详情接口读取完整内容，降低首屏与轮询传输量。
 
 未配置 `TRENDRADAR_MCP_URL` 时，系统保留旧的 Gemini prompt-first 发现作为兼容回退；该模式不能证明实时联网。生产环境应配置 TrendRadar MCP。
 
@@ -330,8 +334,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - `POST /api/connections/test`：测试 TrendRadar MCP、Gemini 和 Flow 连接。
 - `GET /api/sources`：来源同步状态、外媒来源和条目统计。
 - `POST /api/sources/sync`：立即启动一次 TrendRadar 来源同步。
-- `GET /api/signals?limit=1000&source_id=...`：按日期倒序读取来源条目，可按来源筛选。
+- `GET /api/signals?limit=24&offset=0&source_id=...`：分页、按日期倒序读取来源条目，可按来源筛选。
 - `GET /api/signals/{id}`：读取单个来源条目。
+- `GET /api/cards/{pool}?limit=24&offset=0`：分页读取 `acquire`、`trends`、`prompts` 或 `images` 池卡片。
 - `POST /api/runs/discover`：新建轮次并依次执行①热点获取、②图案提取、③提示词生成。
 - `POST /api/runs/{id}/classify`：对现有轮次执行②可用图案提取；路径名为兼容旧客户端保留。
 - `POST /api/runs/{id}/prompts`：执行③补齐全部提示词；为兼容旧客户端仍接受 `count`，但不再随机截断。

@@ -125,8 +125,24 @@ async def sync_sources():
 async def signals(
     limit: int = Query(default=200, ge=1, le=1000),
     source_id: str | None = Query(default=None, max_length=200),
+    offset: int = Query(default=0, ge=0),
 ):
-    return {"entries": service.list_source_entries(limit, source_id=source_id)}
+    return {
+        "entries": service.list_source_entries(limit, source_id=source_id, offset=offset),
+        "total": service.count_source_entries(source_id=source_id),
+    }
+
+
+@app.get("/api/cards/{pool}")
+async def pool_cards(
+    pool: str,
+    limit: int = Query(default=24, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        return service.list_pool_cards(pool, limit, offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/signals/{entry_id}")

@@ -131,7 +131,11 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 旧 URL 保持可直接访问，但顶部仅呈现总览、信息采集、AI 创意和成品图库四个工作区。全部视图由同一份 `static/index.html` 原生路由实现，避免重复前端代码；界面分组不改变来源、热点、图案、提示词和图片的独立持久化。
 
-视觉规范沿用 StyleKit `Japanese Fresh（日系清新风）`，背景调整为 `#e8eee8` 灰绿色纸张，卡片使用 `#fffdf6` 暖白色，并提高文字、边框和阴影对比度；标题继续使用 Yeseva One，正文使用 Karla。
+视觉规范采用 StyleKit `Apple 风格`：`#f5f5f7` 页面背景、白色内容面、`#0071e3` 强调色、`-apple-system` SF Pro 字体栈、8px 卡片圆角和轻阴影；旧日系样式块已停用，不再加载外部字体，植物装饰和纸张纹理不显示。
+
+所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，AI 创意四池使用 `/api/cards/{pool}?limit=24&offset=...`，IntersectionObserver 在距视口约 600px 时获取并追加下一批。未变化的轮询不会重置当前批次，成品图片还使用原生 `loading="lazy"` 和 `decoding="async"`。媒体源总数很小，仍一次获取后分批渲染。
+
+`list_runs()` 只查询任务摘要字段，禁止重新加入 `raw_discovery` 或 `raw_verification`；完整 AI 响应只由单任务详情读取，避免 `/api/state` 首屏和轮询重复传输大字段。
 
 ## 数据与迁移
 
@@ -200,7 +204,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - TrendRadar MCP 来源同步、来源条目池、事件聚类和四阶段创作流水线已完成。
 - 全类型原始热点、可用图案池、提示词池和生成记录已分开持久化。
 - 全量图案对应提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
-- 管理页已收敛为总览、信息采集、AI 创意和成品图库四个顶部工作区；旧来源与创作池 URL 作为组内深链接保留，整体使用 StyleKit 日系清新风。
+- 管理页已收敛为总览、信息采集、AI 创意和成品图库四个顶部工作区；旧来源与创作池 URL 作为组内深链接保留，整体使用 StyleKit Apple 风格。
 - 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
 - 当前测试以仓库最新 `python -m unittest discover -s tests -v` 结果为准。
 

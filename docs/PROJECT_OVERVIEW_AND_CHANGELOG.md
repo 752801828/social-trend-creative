@@ -146,3 +146,6 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 修复长任务频繁因 Gemini 返回不严格 JSON 而失败：共用 Gemini 调用在返回前统一校验 JSON，无效响应在既有尝试次数内自动重试；解析器同时兼容 JSON 字符串中的裸控制字符。热点注释、图案提取和提示词生成均受此保护。
 - 明确来源配置边界：生产环境配置 TrendRadar MCP 后，新任务只消费 TrendRadar 原生 RSS/可选热榜；地区和 X、TikTok、Instagram、YouTube、Reddit 设置仅用于未配置 MCP 时的旧 Gemini prompt-first 回退，不代表当前生产任务来源或图片发布平台。
 - 原始资讯卡片增加对应中文内容：热点聚类生成的中文标题和摘要写回来源条目，卡片优先显示中文并保留英文原标题，详情同时保留外媒原文摘要；现有数据库启动时自动增加翻译字段，旧条目在下一次获取热点时补齐。
+- 管理页从 Japanese Fresh 切换为 StyleKit Apple 风格：使用 Apple 灰背景、白色内容面、Apple 蓝强调色、系统 SF Pro 字体栈、克制圆角和轻阴影；停用旧日系样式、外部字体、纸张纹理和植物装饰，并保留响应式、键盘焦点及 reduced-motion 支持。
+- 所有池卡片统一懒加载：原始资讯和 AI 创意四池由分页 API 每批只获取并渲染 24 张，IntersectionObserver 接近底部时请求下一页；媒体源一次获取后按相同批次渲染，轮询未变化时保留进度，成品图片使用原生延迟加载与异步解码。
+- 缩减 `/api/state` 任务摘要：列表查询不再返回每轮完整 `raw_discovery` 和 `raw_verification`，完整 AI 响应只在点击卡片或任务后由详情接口读取，显著降低首屏及周期轮询的响应体积。

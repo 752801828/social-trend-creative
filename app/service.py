@@ -604,6 +604,7 @@ class TrendService:
         *,
         source_id: str | None = None,
         lookback_hours: int | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         clauses = []
         values: list[Any] = []
@@ -615,16 +616,24 @@ class TrendService:
             clauses.append("fetched_at>=?")
             values.append(cutoff)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        values.append(min(5000, max(1, limit)))
+        values.extend((min(5000, max(1, limit)), max(0, offset)))
         with self._connect() as db:
             rows = db.execute(
                 f"""SELECT id,external_id,source_kind,source_id,source_name,platform,title,url,
                            author,summary,title_zh,summary_zh,published_at,fetched_at,content_hash
                     FROM source_entries {where}
-                    ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT ?""",
+                    ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT ? OFFSET ?""",
                 values,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_source_entries(self, *, source_id: str | None = None) -> int:
+        with self._connect() as db:
+            if source_id:
+                return int(db.execute(
+                    "SELECT COUNT(*) FROM source_entries WHERE source_id=?", (source_id,)
+                ).fetchone()[0])
+            return int(db.execute("SELECT COUNT(*) FROM source_entries").fetchone()[0])
 
     def get_source_entry(self, entry_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -1429,12 +1438,114 @@ Requirements:
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
-                """SELECT r.*,
+                """SELECT r.id,r.trigger_type,r.status,r.stage,r.started_at,r.finished_at,
+                          r.duration_ms,r.error,r.candidate_count,r.verified_count,
+                          r.generated_count,r.failed_count,
                           (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count
                    FROM runs r ORDER BY r.started_at DESC LIMIT ?""",
                 (min(200, max(1, limit)),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_pool_cards(self, pool: str, limit: int = 24, offset: int = 0) -> dict[str, Any]:
+        limit = min(100, max(1, limit))
+        offset = max(0, offset)
+        if pool == "acquire":
+            with self._connect() as db:
+                runs = [dict(row) for row in db.execute(
+                    """SELECT id,started_at,raw_discovery,candidate_count FROM runs
+                       WHERE raw_discovery!='' ORDER BY started_at DESC"""
+                ).fetchall()]
+            entries = []
+            total = sum(int(run["candidate_count"] or 0) for run in runs)
+            skip = offset
+            for run in runs:
+                try:
+                    items = self._normalise_candidates(
+                        extract_json_object(run["raw_discovery"]), None
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    items = []
+                if skip >= len(items):
+                    skip -= len(items)
+                    continue
+                for item in items[skip:]:
+                    entries.append({
+                        "item": item,
+                        "run": {"id": run["id"], "started_at": run["started_at"]},
+                        "date": run["started_at"],
+                    })
+                    if len(entries) >= limit:
+                        return {"entries": entries, "total": total}
+                skip = 0
+            return {"entries": entries, "total": total}
+
+        with self._connect() as db:
+            if pool == "trends":
+                total = int(db.execute("SELECT COUNT(*) FROM trends").fetchone()[0])
+                rows = db.execute(
+                    """SELECT t.*,r.started_at AS run_started_at
+                       FROM trends t JOIN runs r ON r.id=t.run_id
+                       ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                entries = []
+                for row in rows:
+                    item = dict(row)
+                    run_started_at = item.pop("run_started_at")
+                    for key in ("platforms", "evidence", "risk_flags"):
+                        item[key] = json.loads(item[key])
+                    entries.append({
+                        "item": item,
+                        "run": {"id": item["run_id"], "started_at": run_started_at},
+                        "date": item["created_at"],
+                    })
+            elif pool == "prompts":
+                total = int(db.execute("SELECT COUNT(*) FROM prompt_pool").fetchone()[0])
+                rows = db.execute(
+                    """SELECT p.*,t.topic_zh,t.category,r.started_at AS run_started_at
+                       FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
+                       JOIN runs r ON r.id=p.run_id
+                       ORDER BY p.created_at DESC LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                entries = []
+                for row in rows:
+                    item = dict(row)
+                    run_started_at = item.pop("run_started_at")
+                    entries.append({
+                        "item": item,
+                        "run": {"id": item["run_id"], "started_at": run_started_at},
+                        "date": item["created_at"],
+                    })
+            elif pool == "images":
+                total = int(db.execute(
+                    "SELECT COUNT(*) FROM generations WHERE image_path IS NOT NULL"
+                ).fetchone()[0])
+                rows = db.execute(
+                    """SELECT g.id,g.run_id,g.trend_id,g.prompt_id,g.sequence,g.model,g.prompt,
+                              g.status,g.image_path,g.mime_type,g.duration_ms,g.error,g.created_at,
+                              g.finished_at,t.topic_zh,r.started_at AS run_started_at
+                       FROM generations g JOIN trends t ON t.id=g.trend_id
+                       JOIN runs r ON r.id=g.run_id WHERE g.image_path IS NOT NULL
+                       ORDER BY g.created_at DESC LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                entries = []
+                for row in rows:
+                    item = dict(row)
+                    topic_zh = item.pop("topic_zh")
+                    run_started_at = item.pop("run_started_at")
+                    item["image_url"] = f"/assets/{item['image_path']}"
+                    entries.append({
+                        "item": item,
+                        "trend": {"id": item["trend_id"], "topic_zh": topic_zh},
+                        "run": {"id": item["run_id"], "started_at": run_started_at},
+                        "date": item["created_at"],
+                    })
+            else:
+                raise ValueError("未知卡片池")
+        return {"entries": entries, "total": total}
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:

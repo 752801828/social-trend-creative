@@ -188,6 +188,23 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
         self.assertEqual(runs[0]["prompt_count"], 2)
+        self.assertEqual(self.service.list_pool_cards("acquire", 1, 0)["total"], 2)
+        self.assertEqual(len(self.service.list_pool_cards("acquire", 1, 0)["entries"]), 1)
+        self.assertEqual(self.service.list_pool_cards("trends", 1, 1)["total"], 2)
+        self.assertEqual(len(self.service.list_pool_cards("trends", 1, 1)["entries"]), 1)
+        self.assertEqual(self.service.list_pool_cards("prompts", 1, 0)["total"], 2)
+
+    def test_run_list_omits_large_ai_responses(self):
+        run_id = self.service.create_run("manual")
+        self.service._update_run(
+            run_id,
+            raw_discovery='{"trends":[]}',
+            raw_verification='{"classified_trends":[]}',
+        )
+        summary = self.service.list_runs()[0]
+        self.assertNotIn("raw_discovery", summary)
+        self.assertNotIn("raw_verification", summary)
+        self.assertEqual(summary["id"], run_id)
 
     def test_invalid_classification_schema_never_promotes_raw_trends(self):
         run_id = self.service.create_run("manual")
@@ -302,6 +319,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(first, {"fetched": 1, "inserted": 1})
         self.assertEqual(second, {"fetched": 1, "inserted": 0})
         self.assertEqual(len(entries), 1)
+        self.assertEqual(self.service.count_source_entries(), 1)
+        self.assertEqual(self.service.list_source_entries(offset=1), [])
         self.assertEqual(entries[0]["url"], "https://example.com/quake")
         self.assertEqual(entries[0]["published_at"], "2026-08-18T10:00:00+00:00")
 
@@ -433,8 +452,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("renderModuleTabs", self.html)
         self.assertIn('id="moduleContent"', self.html)
         self.assertIn("renderModuleContent", self.html)
-        self.assertIn("moduleEntries", self.html)
-        self.assertIn("new Date(b.date)-new Date(a.date)", self.html)
+        self.assertIn("/api/cards/${currentPage}", self.html)
         self.assertIn("cardAttrs", self.html)
         self.assertIn("safeHttpUrl", self.html)
         self.assertIn("风险标记：", self.html)
@@ -482,13 +500,27 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("renderRawDetail", self.html)
         self.assertIn("点击卡片查看对应内容", self.html)
 
-    def test_stylekit_japanese_fresh_theme_is_applied(self):
-        self.assertIn("Japanese Fresh", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
-        self.assertIn("#e8eee8", self.html)
-        self.assertIn("Yeseva One", self.html)
-        self.assertIn('class="botanical"', self.html)
+    def test_apple_style_is_applied(self):
+        self.assertIn("Apple 风格", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("#f5f5f7", self.html)
+        self.assertIn("#0071e3", self.html)
+        self.assertIn("-apple-system", self.html)
+        self.assertIn("body:before,.botanical{display:none!important}", self.html)
+        self.assertNotIn("fonts.loli.net", self.html)
         self.assertIn("prefers-reduced-motion", self.html)
         self.assertIn("box-shadow:var(--shadow)", self.html)
+
+    def test_all_pool_cards_render_in_lazy_batches(self):
+        self.assertIn("CARD_BATCH_SIZE=24", self.html)
+        self.assertIn("IntersectionObserver", self.html)
+        self.assertIn("renderLazyCards(result.sources,sourceCard", self.html)
+        self.assertIn("renderLazyCards(result.entries||[],signalCard", self.html)
+        self.assertIn("renderLazyCards(result.entries||[],renderer", self.html)
+        self.assertIn("offset=>api(signalPageUrl(offset))", self.html)
+        self.assertIn("offset=>api(`/api/cards/${currentPage}", self.html)
+        self.assertIn('loading="lazy" decoding="async"', self.html)
+        self.assertIn("content-visibility:auto", self.html)
+        self.assertNotIn("Promise.all(runs.map", self.html)
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
         self.assertIn('id="cfgAcquireInterval"', self.html)
