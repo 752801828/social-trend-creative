@@ -509,6 +509,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertNotIn("fonts.loli.net", self.html)
         self.assertIn("prefers-reduced-motion", self.html)
         self.assertIn("box-shadow:var(--shadow)", self.html)
+        self.assertIn(".module-layout{display:block;margin-top:30px}", self.html)
 
     def test_all_pool_cards_render_in_lazy_batches(self):
         self.assertIn("CARD_BATCH_SIZE=24", self.html)
