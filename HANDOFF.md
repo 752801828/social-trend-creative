@@ -29,21 +29,22 @@ git log -5 --oneline
 
 ## 当前架构
 
-系统由独立来源同步和四个创作阶段组成：
+系统由独立来源同步和五个创作阶段组成：
 
 1. 来源同步：通过 TrendRadar Streamable HTTP MCP 幂等保存原生 RSS/可选热榜条目到 `source_entries`。
 2. 热点获取：将查询窗口内全部来源条目按事件聚类，Gemini 分批翻译、分类并标记风险，形成全类型原始热点。
 3. 图案提取：把全部原始热点分批转译为安全、原创、可复用、与产品无关的视觉方向，优先保留主体、关键动作和场景并形成可识别的漫画或编辑插画；抽象元素只辅助具体叙事，或在具体画面不安全时替代，写入 `trends`。
-4. 提示词生成：为全部尚未处理的可用图案逐条生成产品效果图提示词，写入 `prompt_pool`。
-5. 生图：随机抽取 `prompt_pool` 条目交给 Flow，把图案直接生成在产品上，图片记录保存对应 `prompt_id`。
+4. 提示词生成：为全部尚未处理的视觉方向逐条生成 `pattern_prompt` 和参考图产品提示词，写入 `prompt_pool`。
+5. 图案生成：随机抽取提示词交给 Flow，生成无产品的独立漫画、图标、徽章、符号、抽象纹样或其他图案，写入 `pattern_assets`。
+6. 产品图生成：通过 Flow 图生图传入实际图案资产，把同一图案印在产品上，记录 `prompt_id` 和 `pattern_asset_id`。
 
 核心关系为：
 
 ```text
-Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-pool entry → Generation task
+Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-pool entry → Pattern asset → Product rendering
 ```
 
-来源同步不创建任务。点击“获取热点”会同步来源并在同一任务中建立热点、图案和提示词三池。只有生图随机抽取；提示词池条目可以重复用于多次生图，`used_count` 记录使用次数。
+来源同步不创建任务。点击“获取热点”会同步来源并在同一任务中建立热点、视觉方向和提示词三池。只有图案生成随机抽取；提示词池可重复生成不同图案，`used_count` 记录图案生成次数。产品图只消费成功且尚未生成对应产品图的图案资产。
 
 热点聚类产生的 `topic_zh` 和 `summary_zh` 同步写回该来源簇中的 `source_entries.title_zh/summary_zh`。“原始资讯”卡片和详情优先显示中文，保留英文原标题和原文摘要；尚未参加聚类的新条目暂时显示原文，下一次获取热点时补齐。
 
@@ -55,7 +56,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 不设最终最多保留热点数量；不能因 `Exceeds the maximum accepted limit of 5 trends` 拒绝原始热点。
 - `candidate_count` 仅为 Gemini 聚类注释、图案提取和提示词生成的批处理大小，不是热点总数上限。
 - 第二阶段默认尝试转译每个热点，必须保留可识别的事件锚点。球队、品牌和真人身份改为无标志、非肖像化的通用角色，但不得因此删除热点的关键动作、冲突和环境；只有无法安全、尊重事实且不侵权表达时才不进入可用图案池。
-- 第三阶段提示词默认约 140–240 个英文单词，必须完整描述事件相关主体、动作、场景、构图、风格、配色以及产品印刷效果，不能用无关抽象纹样或通用类别图标取代新闻内容。
+- 第三阶段为每个方向输出独立图案提示词和约 140–240 个英文单词的参考图产品提示词；图案可以是漫画、图标、徽章、符号、抽象纹样等，但必须与事件相关。
 - 第三阶段可选择杯子、随行杯、手机壳、T 恤、卫衣、帆布袋、抱枕、毯子、备胎罩、贴纸、海报或其他可印刷物品。
 - 图案必须自然服从物品曲面、褶皱、接缝、材质、位置和比例；每个提示词只生成一个主要物品。
 - 项目不得导入、复制或修改 Gemini2API/Flow2API 源码，也不得管理其容器。
@@ -65,24 +66,25 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `awaiting_classification`：全类型原始热点已获取，等待图案提取。
 - `trend_pool_ready`：可用图案提取完成；内部状态名为兼容旧记录保留。
 - `prompt_pool_ready`：提示词池已生成或追加。
+- `pattern_assets_ready`：独立图案已生成，可继续生成产品图。
 - `completed` / `partial` / `failed` / `cancelled`：生图或阶段最终结果。
 - `ready`：可用图案池或提示词池条目可用。
 - 任一时刻只允许一个阶段任务运行，冲突返回 HTTP `409`。
-- 手动“获取热点”固定建立三池，“一键完整流水线”继续随机产品生图。
-- 热点获取和随机生图拥有独立间隔；`enabled` 控制前三阶段任务，`auto_generate` 控制定时随机生图。间隔允许 15–1440 分钟，服务重启后从当前时间周期继续，不集中补跑。
+- 手动“获取热点”固定建立三池，“一键完整流水线”依次执行独立图案和参考图产品图。
+- 热点获取和两步生图拥有独立间隔；`enabled` 控制前三池任务，`auto_generate` 控制定时执行“图案→产品”。间隔允许 15–1440 分钟，服务重启后从当前时间周期继续，不集中补跑。
 - 调度和定时自动生图默认均关闭。
 - 来源同步拥有独立开关和间隔，默认关闭、默认 10 分钟；来源条目默认保留 30 天，热榜导入默认关闭。
 
 ## 当前默认策略
 
 - 热点、图案与提示词生成间隔：165 分钟（2 小时 45 分）
-- 随机生图间隔：90 分钟（1.5 小时）
+- 随机图案与产品图间隔：90 分钟（1.5 小时）
 - 时区：`Asia/Shanghai`
 - 回溯窗口：24 小时
 - 地区：当前 RSS 清单以美国媒体为主、全球英语外媒补充；仅回退模式读取地区设置
 - 来源平台：TrendRadar 配置的原生 RSS；X、TikTok、Instagram、YouTube、Reddit 仅为回退模式设置
 - AI 批处理大小：10，不限制最终热点总数
-- 每轮随机生图数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
+- 每轮随机图案/产品数：5，可配置 1–30（内部兼容字段仍名为 `images_per_trend`）
 - Gemini 获取模型：`gemini-pro-thinking`
 - Gemini 分类/提示词模型：`gemini-flash`
 - Flow 默认模型：`gemini-3.1-flash-image-landscape`
@@ -114,8 +116,10 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `POST /api/runs/discover`：①②③同一轮次顺序执行
 - `POST /api/runs/{run_id}/classify`：②拆分分类
 - `POST /api/runs/{run_id}/prompts`：③为全部未处理图案补齐提示词；旧 `count` 参数保留兼容但不参与抽样
-- `POST /api/runs/{run_id}/generate`：④随机提示词生图，JSON 为 `{}` 或 `{"count":3}`
-- `POST /api/runs/full`：①②③④完整流水线
+- `POST /api/runs/{run_id}/patterns`：④随机生成独立图案，JSON 为 `{}` 或 `{"count":3}`
+- `POST /api/runs/{run_id}/products`：⑤用未消费图案生成产品图
+- `POST /api/runs/{run_id}/generate`：兼容入口，连续执行④⑤
+- `POST /api/runs/full`：完整流水线
 - `GET /api/runs/{run_id}`
 - `POST /api/runs/{run_id}/cancel`
 - `DELETE /api/runs/{run_id}`
@@ -125,16 +129,17 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `/`：全局总览、统计、连接、设置和一键完整流水线。
 - `/sources`：顶部“信息采集”入口；组内标签切换媒体源和 `/signals` 原始资讯，点击来源可筛选其条目。
 - `/acquire`：顶部“AI 创意”入口；组内标签切换全部热点、`/trends` 可用图案和 `/prompts` 生成提示词。
-- `/images`：顶部“成品图库”入口，展示随机提示词生成的产品图片。
+- `/patterns`：顶部“生图工坊”入口中的图案图库，展示独立图案。
+- `/images`：生图工坊中的产品图库，展示引用实际图案生成的产品图片。
 - TrendRadar `:8080` 入口位于信息采集摘要区；独立关联服务栏、RSSHub 和 NewsNow 入口均已移除。
 - 点击任意内容卡片只打开对应热点、图案、提示词或图片，顶部同时显示所属任务摘要；图片本身仍可单独点击放大。
-- 任务详情可补齐中断的图案或提示词阶段，并可为随机生图手动指定 1–30 张。
+- 任务详情可补齐中断阶段，并可分别为随机图案和产品图指定 1–30 张。
 
-旧 URL 保持可直接访问，但顶部仅呈现总览、信息采集、AI 创意和成品图库四个工作区。全部视图由同一份 `static/index.html` 原生路由实现，避免重复前端代码；界面分组不改变来源、热点、图案、提示词和图片的独立持久化。
+旧 URL 保持可直接访问，但顶部仅呈现总览、信息采集、AI 创意和生图工坊四个工作区。全部视图由同一份 `static/index.html` 原生路由实现；生图工坊用组内标签区分图案图库和产品图库。
 
 视觉规范采用 StyleKit `Apple 风格`：`#f5f5f7` 页面背景、白色内容面、`#0071e3` 强调色、`-apple-system` SF Pro 字体栈、8px 卡片圆角和轻阴影；旧日系样式块已停用，不再加载外部字体，植物装饰和纸张纹理不显示。
 
-所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，AI 创意四池使用 `/api/cards/{pool}?limit=24&offset=...`，IntersectionObserver 在距视口约 600px 时获取并追加下一批。未变化的轮询不会重置当前批次，成品图片还使用原生 `loading="lazy"` 和 `decoding="async"`。媒体源总数很小，仍一次获取后分批渲染。
+所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，热点、视觉方向、提示词、图案资产和产品图使用 `/api/cards/{pool}?limit=24&offset=...`。IntersectionObserver 在距视口约 600px 时获取并追加下一批，图片使用原生 `loading="lazy"` 和 `decoding="async"`。
 
 `list_runs()` 只查询任务摘要字段，禁止重新加入 `raw_discovery` 或 `raw_verification`；完整 AI 响应只由单任务详情读取，避免 `/api/state` 首屏和轮询重复传输大字段。
 
@@ -143,8 +148,8 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - SQLite：`data/trend-creative.db`
 - 图片：`data/assets/<run>/<trend>/`
 - Docker 挂载：`./data:/app/data`
-- `trends` 是可用图案池（旧表名保留）；`prompt_pool` 是提示词池；`generations.prompt_id` 追踪图片使用的提示词。
-- 启动时自动创建 `prompt_pool`，并为旧 `generations` 表补 `prompt_id`，不需要手工迁移。
+- `trends` 是视觉方向池（旧表名保留）；`prompt_pool` 成对保存图案/产品提示词；`pattern_assets` 保存独立图案；`generations` 保存产品图并通过 `pattern_asset_id` 追踪参考图。
+- 启动时自动创建 `pattern_assets`，为旧 `prompt_pool` 补 `pattern_prompt`，并为旧 `generations` 补 `pattern_asset_id`，不需要手工迁移。
 - 删除轮次会级联删除可用图案池、提示词池、生成记录及本地图片；必须保留运行中保护和路径范围检查。
 
 ## 环境变量
@@ -202,10 +207,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 
 ## 当前完成状态
 
-- TrendRadar MCP 来源同步、来源条目池、事件聚类和四阶段创作流水线已完成。
-- 全类型原始热点、可用图案池、提示词池和生成记录已分开持久化。
-- 全量图案对应提示词、随机提示词产品生图及 `prompt_id` 追踪已完成。
-- 管理页已收敛为总览、信息采集、AI 创意和成品图库四个顶部工作区；旧来源与创作池 URL 作为组内深链接保留，整体使用 StyleKit Apple 风格。
+- TrendRadar MCP 来源同步、来源条目池、事件聚类和五阶段创作流水线已完成。
+- 全类型原始热点、视觉方向池、双提示词池、独立图案资产和产品图记录已分开持久化。
+- 随机提示词先生成图案、产品图再通过 Base64 参考图使用同一图案，`prompt_id` 与 `pattern_asset_id` 均可追踪。
+- 管理页已收敛为总览、信息采集、AI 创意和生图工坊四个顶部工作区；生图工坊包含图案图库和产品图库。
 - 物品图、来源可选、全球优先地区、图片放大、取消/删除、调度和通知均保留。
 - 当前测试以仓库最新 `python -m unittest discover -s tests -v` 结果为准。
 

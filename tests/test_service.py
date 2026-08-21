@@ -108,13 +108,18 @@ class TrendServiceTests(unittest.TestCase):
         pool_prompt = self.service._prompt_pool_prompt([trend])
         self.assertIn('"topic_zh": "Trend"', pool_prompt)
         self.assertIn("every supplied pattern-pool entry", pool_prompt)
-        self.assertIn("exactly one prompt for every supplied trend_id", pool_prompt)
+        self.assertIn("exactly one prompt pair for every supplied trend_id", pool_prompt)
+        self.assertIn("pattern_prompt and a product_prompt", pool_prompt)
+        self.assertIn("transparent or clean plain background", pool_prompt)
         self.assertIn("printed directly on the product", pool_prompt)
         self.assertIn("vehicle spare-tire cover", pool_prompt)
-        self.assertIn("roughly 140–240 words", pool_prompt)
-        self.assertIn("immediately recognizable as a creative interpretation", pool_prompt)
-        self.assertIn("do not reduce a narrative event", pool_prompt)
+        self.assertIn("roughly 140–240 English words", pool_prompt)
+        self.assertIn("attached generated pattern image as the exact artwork reference", pool_prompt)
+        self.assertIn("icon set, emblem, badge", pool_prompt)
         self.assertIn("generic unbranded equivalents", pool_prompt)
+        pattern_flow_prompt = self.service._pattern_flow_prompt(trend)
+        self.assertIn("standalone, original, print-ready artwork", pattern_flow_prompt)
+        self.assertIn("Do not show a product, mockup", pattern_flow_prompt)
         flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
         self.assertIn("printed directly on the single physical product", flow_prompt)
         self.assertIn("vehicle spare-tire cover", flow_prompt)
@@ -181,7 +186,11 @@ class TrendServiceTests(unittest.TestCase):
 
             prompt_response = {
                 "prompts": [
-                    {"trend_id": item["id"], "prompt": f"Prompt for {item['topic_en']}"}
+                    {
+                        "trend_id": item["id"],
+                        "pattern_prompt": f"Pattern for {item['topic_en']}",
+                        "product_prompt": f"Product for {item['topic_en']}",
+                    }
                     for item in run["trends"]
                 ]
             }
@@ -198,6 +207,7 @@ class TrendServiceTests(unittest.TestCase):
         run, runs = asyncio.run(exercise())
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
+        self.assertTrue(all(item["pattern_prompt"].startswith("Pattern for") for item in run["prompt_pool"]))
         self.assertEqual(runs[0]["prompt_count"], 2)
         self.assertEqual(self.service.list_pool_cards("acquire", 1, 0)["total"], 2)
         self.assertEqual(len(self.service.list_pool_cards("acquire", 1, 0)["entries"]), 1)
@@ -242,7 +252,7 @@ class TrendServiceTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(self.service.get_run(run_id)["trends"], [])
 
-    def test_generation_randomly_consumes_a_prompt_pool_entry(self):
+    def test_generation_creates_pattern_then_product_from_the_same_prompt(self):
         run_id = self.service.create_run("manual")
         trend = self._candidate("candidate-1", "Fresh", "", None)
         trend.pop("candidate_id")
@@ -250,24 +260,41 @@ class TrendServiceTests(unittest.TestCase):
         self.service._replace_trends(run_id, [trend])
         with self.service._connect() as db:
             db.execute(
-                "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
-                ("prompt-1", run_id, "trend-1", "POOL PROMPT ONLY", "ready", utc_now()),
+                """INSERT INTO prompt_pool
+                   (id,run_id,trend_id,pattern_prompt,prompt,status,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                ("prompt-1", run_id, "trend-1", "PATTERN PROMPT", "PRODUCT PROMPT", "ready", utc_now()),
             )
 
         async def exercise():
-            async def fake_flow(prompt, _model):
-                self.assertEqual(prompt, "POOL PROMPT ONLY")
-                return "ok", b"image", "image/png"
+            calls = []
+
+            async def fake_flow(prompt, _model, reference_image=None):
+                calls.append((prompt, reference_image))
+                return "ok", b"pattern" if reference_image is None else b"product", "image/png"
 
             self.service._call_flow = fake_flow
             await self.service._generate_from_prompt_pool(run_id, self.service.get_config(), 1)
+            return calls
 
-        asyncio.run(exercise())
+        calls = asyncio.run(exercise())
         run = self.service.get_run(run_id)
+        pattern = run["pattern_assets"][0]
         generation = run["trends"][0]["generations"][0]
+        self.assertEqual(calls[0], ("PATTERN PROMPT", None))
+        self.assertIn("exact finished artwork reference", calls[1][0])
+        self.assertIn("PRODUCT PROMPT", calls[1][0])
+        self.assertEqual(calls[1][1], (b"pattern", "image/png"))
+        self.assertEqual(pattern["prompt_id"], "prompt-1")
+        self.assertEqual(pattern["prompt"], "PATTERN PROMPT")
         self.assertEqual(generation["prompt_id"], "prompt-1")
-        self.assertEqual(generation["prompt"], "POOL PROMPT ONLY")
+        self.assertEqual(generation["pattern_asset_id"], pattern["id"])
+        self.assertIn("exact finished artwork reference", generation["prompt"])
+        self.assertIn("PRODUCT PROMPT", generation["prompt"])
         self.assertEqual(run["prompt_pool"][0]["used_count"], 1)
+        self.assertEqual(self.service.list_runs()[0]["pattern_count"], 1)
+        self.assertEqual(self.service.list_pool_cards("patterns", 1, 0)["total"], 1)
+        self.assertEqual(self.service.list_pool_cards("images", 1, 0)["total"], 1)
 
     def test_generation_schedule_runs_without_acquisition_schedule(self):
         run_id = self.service.create_run("manual")
@@ -375,9 +402,17 @@ class TrendServiceTests(unittest.TestCase):
         asyncio.run(self.service.http.aclose())
         self.service.flow_base_url = "https://flow.example"
         self.service.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        asyncio.run(self.service._call_flow("prompt", FLOW_MODELS[0]))
+        asyncio.run(self.service._call_flow(
+            "prompt", FLOW_MODELS[0], (b"pattern", "image/png")
+        ))
 
         self.assertEqual(requests[0].headers["authorization"], "Bearer test-key")
+        content = json.loads(requests[0].content)["messages"][0]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "prompt"})
+        self.assertEqual(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,cGF0dGVybg==",
+        )
         self.assertNotIn("authorization", requests[1].headers)
 
     def test_cancelled_generation_restores_selectable_trend_status(self):
@@ -437,7 +472,8 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("① 获取热点", self.html)
         self.assertIn("② 提取可用图案", self.html)
         self.assertIn("③ 补齐全部提示词", self.html)
-        self.assertIn("④ 随机产品生图", self.html)
+        self.assertIn("④ 随机生成图案", self.html)
+        self.assertIn("⑤ 生成产品图", self.html)
         self.assertIn("获取全部热点，并在同一任务中依次建立可用图案池和提示词池", self.html)
         self.assertIn('launch_full_pipeline(trigger_type="manual", auto_generate=False)', main)
         self.assertIn("热点来源平台", self.html)
@@ -450,11 +486,12 @@ class StaticPageTests(unittest.TestCase):
             ("/acquire", "全部热点"),
             ("/trends", "可用图案"),
             ("/prompts", "生成提示词"),
-            ("/images", "成品图库"),
+            ("/patterns", "图案图库"),
+            ("/images", "产品图库"),
         ):
             self.assertIn(f'@app.get("{path}")', main)
             self.assertIn(label, self.html)
-        for label in ("总览", "信息采集", "AI 创意", "成品图库"):
+        for label in ("总览", "信息采集", "AI 创意", "生图工坊"):
             self.assertIn(label, self.html)
         self.assertEqual(self.html.count('class="module-nav"'), 1)
         self.assertEqual(self.html.count('data-group="'), 4)
@@ -506,6 +543,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("cardAttrs(run,'raw',item.candidate_id)", self.html)
         self.assertIn("cardAttrs(run,'trend',item.id)", self.html)
         self.assertIn("cardAttrs(run,'prompt',item.id)", self.html)
+        self.assertIn("cardAttrs(run,'pattern',item.id)", self.html)
         self.assertIn("cardAttrs(run,'image',item.id)", self.html)
         self.assertIn("selectedContent", self.html)
         self.assertIn("renderRawDetail", self.html)
@@ -540,7 +578,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("acquisition_interval_minutes", self.html)
         self.assertIn("generation_interval_minutes", self.html)
         self.assertIn("热点、图案与提示词生成间隔（分钟）", self.html)
-        self.assertIn("每轮随机生图数（1–30）", self.html)
+        self.assertIn("每轮随机图案/产品数（1–30）", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)

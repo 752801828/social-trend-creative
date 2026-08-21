@@ -29,14 +29,20 @@ An original, production-safe, product-independent visual translation of a raw tr
 _Avoid_: Trend-pool entry, candidate, topic
 
 **Prompt-pool entry**:
-A concrete product-rendering prompt deterministically created for a pattern-pool entry; every unprocessed pattern receives one prompt, while image generation randomly consumes prompt-pool entries.
+A paired standalone-artwork prompt and reference-image product prompt deterministically created for a pattern-pool entry. Every unprocessed direction receives one pair; pattern generation randomly consumes entries.
 _Avoid_: Visual brief
 
-**Generation task**:
-One Flow request for one randomly selected prompt-pool entry and one selected image model.
+**Pattern asset**:
+A standalone Flow-generated printable artwork—such as an icon, badge, comic, emblem, symbol, abstract repeat, or decorative motif—with no product or mockup. It records its prompt-pool entry.
+
+**Pattern generation task**:
+One Flow text-to-image request for one randomly selected prompt-pool entry and one image model.
+
+**Product generation task**:
+One Flow image-to-image request that sends a successful pattern asset as a Base64 reference image and renders that same artwork on one physical product.
 
 **Product rendering**:
-A realistic image of one physical item with trend-derived artwork printed directly on its usable surface, respecting curvature, seams, folds, material, placement, and scale.
+A realistic image of one physical item with a specific stored pattern asset printed directly on its usable surface, respecting curvature, seams, folds, material, placement, and scale.
 
 **Prompt-first discovery**:
 Asking Gemini Web to research public sources and return raw trends. It is not proof of live browsing; real evidence is retained when available but is not a pipeline gate.

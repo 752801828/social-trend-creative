@@ -82,6 +82,7 @@ async def index():
 @app.get("/signals")
 @app.get("/trends")
 @app.get("/prompts")
+@app.get("/patterns")
 @app.get("/images")
 async def module_page():
     return FileResponse(ROOT / "static" / "index.html")
@@ -239,6 +240,28 @@ async def prompts(run_id: str, request: PoolRequest):
 async def generate(run_id: str, request: PoolRequest):
     try:
         launched = service.launch_generation(run_id, request.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted", "count": request.count}
+
+
+@app.post("/api/runs/{run_id}/patterns", status_code=202)
+async def generate_patterns(run_id: str, request: PoolRequest):
+    try:
+        launched = service.launch_pattern_generation(run_id, request.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted", "count": request.count}
+
+
+@app.post("/api/runs/{run_id}/products", status_code=202)
+async def generate_products(run_id: str, request: PoolRequest):
+    try:
+        launched = service.launch_product_generation(run_id, request.count)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:

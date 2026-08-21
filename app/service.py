@@ -249,16 +249,36 @@ class TrendService:
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
                     trend_id TEXT NOT NULL REFERENCES trends(id) ON DELETE CASCADE,
+                    pattern_prompt TEXT NOT NULL DEFAULT '',
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'ready',
                     used_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_prompt_pool_run ON prompt_pool(run_id, created_at);
+                CREATE TABLE IF NOT EXISTS pattern_assets (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    trend_id TEXT NOT NULL REFERENCES trends(id) ON DELETE CASCADE,
+                    prompt_id TEXT REFERENCES prompt_pool(id) ON DELETE SET NULL,
+                    sequence INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    image_path TEXT,
+                    mime_type TEXT,
+                    duration_ms INTEGER,
+                    error TEXT NOT NULL DEFAULT '',
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pattern_assets_run ON pattern_assets(run_id, trend_id);
                 CREATE TABLE IF NOT EXISTS generations (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
                     trend_id TEXT NOT NULL REFERENCES trends(id) ON DELETE CASCADE,
+                    pattern_asset_id TEXT REFERENCES pattern_assets(id) ON DELETE SET NULL,
                     sequence INTEGER NOT NULL,
                     model TEXT NOT NULL,
                     prompt TEXT NOT NULL,
@@ -308,6 +328,11 @@ class TrendService:
             generation_columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
             if "prompt_id" not in generation_columns:
                 db.execute("ALTER TABLE generations ADD COLUMN prompt_id TEXT")
+            if "pattern_asset_id" not in generation_columns:
+                db.execute("ALTER TABLE generations ADD COLUMN pattern_asset_id TEXT")
+            prompt_columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
+            if "pattern_prompt" not in prompt_columns:
+                db.execute("ALTER TABLE prompt_pool ADD COLUMN pattern_prompt TEXT NOT NULL DEFAULT ''")
             source_columns = {row["name"] for row in db.execute("PRAGMA table_info(source_entries)")}
             for name in ("title_zh", "summary_zh"):
                 if name not in source_columns:
@@ -704,6 +729,38 @@ class TrendService:
             raise ValueError("提示词池为空，请先生成提示词池")
         return self._launch(run_id, self._run_stage(run_id, "generation", count), f"generate-{run_id}")
 
+    def launch_pattern_generation(self, run_id: str, count: int | None = None) -> bool:
+        with self._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM prompt_pool WHERE run_id=? AND status='ready' LIMIT 1", (run_id,)
+            ).fetchone()
+        if not exists:
+            raise ValueError("提示词池为空，请先生成提示词池")
+        return self._launch(
+            run_id,
+            self._run_stage(run_id, "pattern_generation", count),
+            f"patterns-{run_id}",
+        )
+
+    def launch_product_generation(self, run_id: str, count: int | None = None) -> bool:
+        with self._connect() as db:
+            exists = db.execute(
+                """SELECT 1 FROM pattern_assets a
+                   WHERE a.run_id=? AND a.status='success'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM generations g
+                       WHERE g.pattern_asset_id=a.id AND g.status='success'
+                     ) LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+        if not exists:
+            raise ValueError("没有待生成产品图的图案，请先生成图案")
+        return self._launch(
+            run_id,
+            self._run_stage(run_id, "product_generation", count),
+            f"products-{run_id}",
+        )
+
     def launch_full_pipeline(self, *, trigger_type: str = "manual", auto_generate: bool = True) -> str | None:
         if self.active_task and not self.active_task.done():
             return None
@@ -733,10 +790,14 @@ class TrendService:
                     await self._classify_trend_pool(run_id, config)
                 if stage in {"prompt_pool", "full"}:
                     await self._create_prompt_pool(run_id, config, count)
+                if stage == "pattern_generation":
+                    await self._generate_pattern_assets(run_id, config, count)
+                if stage == "product_generation":
+                    await self._generate_products_from_patterns(run_id, config, count)
                 if stage == "generation" or (stage == "full" and auto_generate):
                     await self._generate_from_prompt_pool(run_id, config, count)
                 self._finish_duration(run_id, started)
-                if stage != "generation" and not (stage == "full" and auto_generate):
+                if stage not in {"generation", "product_generation"} and not (stage == "full" and auto_generate):
                     await self._notify_run(run_id)
             except asyncio.CancelledError:
                 self._update_run(run_id, status="cancelled", stage="finished", error="任务已取消", finished_at=utc_now())
@@ -959,7 +1020,7 @@ Schema:
         if not trends:
             raise ValueError("没有待生成提示词的可用图案")
         self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
-        supplied_map = {}
+        supplied_map: dict[str, dict[str, str]] = {}
         batch_size = int(config["candidate_count"])
         for offset in range(0, len(trends), batch_size):
             response_text = await self._call_gemini(
@@ -970,17 +1031,24 @@ Schema:
             payload = extract_json_object(response_text)
             supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
             supplied_map.update({
-                str(item.get("trend_id")): str(item.get("prompt") or "").strip()
+                str(item.get("trend_id")): {
+                    "pattern_prompt": str(item.get("pattern_prompt") or "").strip(),
+                    "product_prompt": str(item.get("product_prompt") or item.get("prompt") or "").strip(),
+                }
                 for item in supplied if isinstance(item, dict)
             })
         prompt_ids = []
         with self._connect() as db:
             for trend in trends:
                 prompt_id = secrets.token_hex(12)
-                prompt = supplied_map.get(trend["id"]) or self._flow_prompt(trend)
+                supplied = supplied_map.get(trend["id"], {})
+                pattern_prompt = supplied.get("pattern_prompt") or self._pattern_flow_prompt(trend)
+                prompt = supplied.get("product_prompt") or self._flow_prompt(trend)
                 db.execute(
-                    "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?, 'ready', ?)",
-                    (prompt_id, run_id, trend["id"], prompt[:10000], utc_now()),
+                    """INSERT INTO prompt_pool
+                       (id,run_id,trend_id,pattern_prompt,prompt,status,created_at)
+                       VALUES(?,?,?,?,?,'ready',?)""",
+                    (prompt_id, run_id, trend["id"], pattern_prompt[:10000], prompt[:10000], utc_now()),
                 )
                 prompt_ids.append(prompt_id)
         self._update_run(run_id, status="prompt_pool_ready", stage="prompt_pool")
@@ -992,9 +1060,22 @@ Schema:
         config: dict[str, Any],
         count: int | None,
     ) -> None:
+        pattern_ids = await self._generate_pattern_assets(run_id, config, count)
+        if not pattern_ids:
+            raise RuntimeError("Flow没有成功生成图案")
+        await self._generate_products_from_patterns(
+            run_id, config, len(pattern_ids), pattern_ids=pattern_ids
+        )
+
+    async def _generate_pattern_assets(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        count: int | None,
+    ) -> list[str]:
         with self._connect() as db:
             prompts = [dict(row) for row in db.execute(
-                """SELECT t.*, p.id AS prompt_id, p.prompt AS pool_prompt
+                """SELECT t.*, p.id AS prompt_id, p.pattern_prompt
                    FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
                    WHERE p.run_id=? AND p.status='ready'""",
                 (run_id,),
@@ -1002,18 +1083,80 @@ Schema:
         if not prompts:
             raise ValueError("提示词池为空，请先生成提示词池")
         selected = random.sample(prompts, min(len(prompts), max(1, count or config["images_per_trend"])))
-        self._update_run(run_id, status="running", stage="generation", error="")
+        self._update_run(run_id, status="running", stage="pattern_generation", error="")
+        semaphore = asyncio.Semaphore(config["generation_concurrency"])
+
+        async def guarded(item: dict[str, Any], sequence: int) -> str | None:
+            async with semaphore:
+                return await self._generate_pattern_one(
+                    run_id,
+                    item,
+                    sequence,
+                    config,
+                    prompt_id=item["prompt_id"],
+                    prompt_text=item["pattern_prompt"] or self._pattern_flow_prompt(item),
+                )
+
+        results = await asyncio.gather(*(guarded(item, index) for index, item in enumerate(selected, 1)))
+        pattern_ids = [item for item in results if item]
+        failed = len(results) - len(pattern_ids)
+        self._update_run(
+            run_id,
+            status="pattern_assets_ready" if pattern_ids and not failed else "partial" if pattern_ids else "failed",
+            stage="pattern_assets" if pattern_ids else "finished",
+            error="" if pattern_ids else "Flow没有成功生成图案",
+        )
+        return pattern_ids
+
+    async def _generate_products_from_patterns(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        count: int | None,
+        *,
+        pattern_ids: list[str] | None = None,
+    ) -> None:
+        with self._connect() as db:
+            params: list[Any] = [run_id]
+            pattern_filter = ""
+            if pattern_ids:
+                pattern_filter = f" AND a.id IN ({','.join('?' for _ in pattern_ids)})"
+                params.extend(pattern_ids)
+            patterns = [dict(row) for row in db.execute(
+                f"""SELECT a.*,t.topic_en,t.topic_zh,t.summary_zh,t.why_trending,t.visual_brief_en,
+                           t.status AS trend_status,p.prompt AS product_prompt
+                    FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
+                    JOIN prompt_pool p ON p.id=a.prompt_id
+                    WHERE a.run_id=? AND a.status='success'{pattern_filter}
+                      AND NOT EXISTS (
+                        SELECT 1 FROM generations g
+                        WHERE g.pattern_asset_id=a.id AND g.status='success'
+                      )""",
+                params,
+            ).fetchall()]
+        if not patterns:
+            raise ValueError("没有待生成产品图的图案，请先生成图案")
+        selected = random.sample(
+            patterns, min(len(patterns), max(1, count or config["images_per_trend"]))
+        )
+        self._update_run(run_id, status="running", stage="product_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
         async def guarded(item: dict[str, Any], sequence: int) -> bool:
             async with semaphore:
+                pattern_path = self.assets_dir / item["image_path"]
+                reference = (pattern_path.read_bytes(), item["mime_type"] or "image/png")
                 return await self._generate_one(
                     run_id,
                     item,
                     sequence,
                     config,
                     prompt_id=item["prompt_id"],
-                    prompt_text=item["pool_prompt"],
+                    prompt_text=self._product_reference_prompt(
+                        item["product_prompt"] or self._flow_prompt(item)
+                    ),
+                    pattern_asset_id=item["id"],
+                    reference_image=reference,
                 )
 
         results = await asyncio.gather(*(guarded(item, index) for index, item in enumerate(selected, 1)))
@@ -1033,9 +1176,80 @@ Schema:
             generated_count=total_success,
             failed_count=total_failed,
             finished_at=utc_now(),
-            error="" if success else "Flow没有成功生成图片",
+            error="" if success else "Flow没有成功生成产品图",
         )
         await self._notify_run(run_id)
+
+    async def _generate_pattern_one(
+        self,
+        run_id: str,
+        trend: dict[str, Any],
+        sequence: int,
+        config: dict[str, Any],
+        *,
+        prompt_id: str,
+        prompt_text: str,
+    ) -> str | None:
+        asset_id = secrets.token_hex(12)
+        model = random.choice(config["flow_models"])
+        started = time.perf_counter()
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO pattern_assets
+                   (id,run_id,trend_id,prompt_id,sequence,model,prompt,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,'running',?)""",
+                (asset_id, run_id, trend["id"], prompt_id, sequence, model, prompt_text, utc_now()),
+            )
+            db.execute("UPDATE prompt_pool SET used_count=used_count+1 WHERE id=?", (prompt_id,))
+            db.execute("UPDATE trends SET status='generating' WHERE id=?", (trend["id"],))
+        try:
+            response_text, image_bytes, mime_type = await self._call_flow(prompt_text, model)
+            suffix = mimetypes.guess_extension(mime_type) or ".png"
+            relative = Path(run_id) / trend["id"] / f"pattern-{asset_id}{suffix}"
+            target = self.assets_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(image_bytes)
+            duration = round((time.perf_counter() - started) * 1000)
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE pattern_assets SET status='success',image_path=?,mime_type=?,duration_ms=?,
+                       raw_response=?,finished_at=? WHERE id=?""",
+                    (relative.as_posix(), mime_type, duration, response_text[:20000], utc_now(), asset_id),
+                )
+                db.execute("UPDATE trends SET status='pattern_generated' WHERE id=?", (trend["id"],))
+            return asset_id
+        except asyncio.CancelledError:
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE pattern_assets SET status='failed',duration_ms=?,error=?,finished_at=?
+                       WHERE id=?""",
+                    (round((time.perf_counter() - started) * 1000), "任务已取消", utc_now(), asset_id),
+                )
+                generated = db.execute(
+                    "SELECT 1 FROM pattern_assets WHERE trend_id=? AND status='success'",
+                    (trend["id"],),
+                ).fetchone()
+                db.execute(
+                    "UPDATE trends SET status=? WHERE id=?",
+                    ("pattern_generated" if generated else trend["status"], trend["id"]),
+                )
+            raise
+        except Exception as exc:
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE pattern_assets SET status='failed',duration_ms=?,error=?,finished_at=?
+                       WHERE id=?""",
+                    (round((time.perf_counter() - started) * 1000), safe_error(exc), utc_now(), asset_id),
+                )
+                generated = db.execute(
+                    "SELECT 1 FROM pattern_assets WHERE trend_id=? AND status='success'",
+                    (trend["id"],),
+                ).fetchone()
+                db.execute(
+                    "UPDATE trends SET status=? WHERE id=?",
+                    ("pattern_generated" if generated else "generation_failed", trend["id"]),
+                )
+            return None
 
     async def _generate_one(
         self,
@@ -1046,27 +1260,35 @@ Schema:
         *,
         prompt_id: str | None = None,
         prompt_text: str | None = None,
+        pattern_asset_id: str | None = None,
+        reference_image: tuple[bytes, str] | None = None,
     ) -> bool:
         generation_id = secrets.token_hex(12)
+        trend_id = str(trend.get("trend_id") or trend["id"])
         model = random.choice(config["flow_models"])
         prompt = prompt_text or self._flow_prompt(trend)
         started = time.perf_counter()
         with self._connect() as db:
             db.execute(
                 """INSERT INTO generations
-                   (id, run_id, trend_id, prompt_id, sequence, model, prompt, status, created_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
-                (generation_id, run_id, trend["id"], prompt_id, sequence, model, prompt, utc_now()),
+                   (id,run_id,trend_id,prompt_id,pattern_asset_id,sequence,model,prompt,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?, 'running', ?)""",
+                (generation_id, run_id, trend_id, prompt_id, pattern_asset_id, sequence, model, prompt, utc_now()),
             )
-            if prompt_id:
+            if prompt_id and not pattern_asset_id:
                 db.execute(
                     "UPDATE prompt_pool SET used_count=used_count+1 WHERE id=?", (prompt_id,)
                 )
-            db.execute("UPDATE trends SET status = 'generating' WHERE id = ?", (trend["id"],))
+            db.execute("UPDATE trends SET status = 'generating' WHERE id = ?", (trend_id,))
         try:
-            response_text, image_bytes, mime_type = await self._call_flow(prompt, model)
+            if reference_image:
+                response_text, image_bytes, mime_type = await self._call_flow(
+                    prompt, model, reference_image
+                )
+            else:
+                response_text, image_bytes, mime_type = await self._call_flow(prompt, model)
             suffix = mimetypes.guess_extension(mime_type) or ".png"
-            relative = Path(run_id) / trend["id"] / f"{generation_id}{suffix}"
+            relative = Path(run_id) / trend_id / f"product-{generation_id}{suffix}"
             target = self.assets_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(image_bytes)
@@ -1077,7 +1299,7 @@ Schema:
                        raw_response=?, finished_at=? WHERE id=?""",
                     (relative.as_posix(), mime_type, duration, response_text[:20000], utc_now(), generation_id),
                 )
-                db.execute("UPDATE trends SET status = 'generated' WHERE id = ?", (trend["id"],))
+                db.execute("UPDATE trends SET status = 'generated' WHERE id = ?", (trend_id,))
             return True
         except asyncio.CancelledError:
             with self._connect() as db:
@@ -1086,11 +1308,11 @@ Schema:
                     (round((time.perf_counter() - started) * 1000), "任务已取消", utc_now(), generation_id),
                 )
                 generated = db.execute(
-                    "SELECT 1 FROM generations WHERE trend_id=? AND status='success'", (trend["id"],)
+                    "SELECT 1 FROM generations WHERE trend_id=? AND status='success'", (trend_id,)
                 ).fetchone()
                 db.execute(
                     "UPDATE trends SET status = ? WHERE id = ?",
-                    ("generated" if generated else trend["status"], trend["id"]),
+                    ("generated" if generated else trend.get("trend_status", trend["status"]), trend_id),
                 )
             raise
         except Exception as exc:
@@ -1100,10 +1322,10 @@ Schema:
                     (round((time.perf_counter() - started) * 1000), safe_error(exc), utc_now(), generation_id),
                 )
                 remaining = db.execute(
-                    "SELECT 1 FROM generations WHERE trend_id=? AND status='success'", (trend["id"],)
+                    "SELECT 1 FROM generations WHERE trend_id=? AND status='success'", (trend_id,)
                 ).fetchone()
                 if not remaining:
-                    db.execute("UPDATE trends SET status = 'generation_failed' WHERE id = ?", (trend["id"],))
+                    db.execute("UPDATE trends SET status = 'generation_failed' WHERE id = ?", (trend_id,))
             return False
 
     async def _call_gemini(self, prompt: str, model: str, *, attempts: int) -> str:
@@ -1134,13 +1356,26 @@ Schema:
                     await asyncio.sleep(2 * attempt)
         raise RuntimeError(f"Gemini请求失败（{attempts}次）: {safe_error(error or RuntimeError('unknown'))}")
 
-    async def _call_flow(self, prompt: str, model: str) -> tuple[str, bytes, str]:
+    async def _call_flow(
+        self,
+        prompt: str,
+        model: str,
+        reference_image: tuple[bytes, str] | None = None,
+    ) -> tuple[str, bytes, str]:
         if not self.flow_api_key:
             raise RuntimeError("FLOW_API_KEY未配置")
+        content: str | list[dict[str, Any]] = prompt
+        if reference_image:
+            image_bytes, mime_type = reference_image
+            data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]
         response = await self.http.post(
             f"{self.flow_base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {self.flow_api_key}"},
-            json={"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
+            json={"model": model, "messages": [{"role": "user", "content": content}], "stream": False},
             timeout=1800,
         )
         response.raise_for_status()
@@ -1270,22 +1505,24 @@ Schema:
             }
             for item in trends
         ]
-        return f"""You create production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
+        return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write one detailed English prompt of roughly 140–240 words for a realistic print-on-demand product rendering. The printed artwork must remain immediately recognizable as a creative interpretation of that specific source event. Preserve the visual brief's subjects, defining action or interaction, and setting; do not reduce a narrative event to unrelated abstract shapes, a generic category icon, or a color palette. Use a concrete original comic or editorial scene by default. Abstract patterns, symbols, geometry, and decorative elements may frame or enrich the scene, and may replace it only when a concrete depiction would be unsafe or disrespectful. Select one suitable physical item and fully specify the characters or objects, action, setting, composition, illustration style, palette, texture, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show the artwork already printed directly on the product, never as separate flat artwork.
+For every input trend_id, write a pattern_prompt and a product_prompt. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork on a transparent or clean plain background, with no product, mockup, room, frame, hands, or merchandising scene. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, abstract repeat, geometric motif, or decorative pattern. Icons and abstraction are welcome when they still communicate the event; concrete subjects, defining action, and setting remain the default for narrative news.
+
+The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
 Rules:
 1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
 2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
 3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Replace protected identities with generic unbranded equivalents, but keep the event's core action and context recognizable.
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
-5. Return exactly one prompt for every supplied trend_id, preserve every trend_id exactly, and return strict JSON only.
+5. Return exactly one prompt pair for every supplied trend_id, preserve every trend_id exactly, and return strict JSON only.
 
 Pattern-pool entries:
 {json.dumps(compact, ensure_ascii=False)}
 
 Schema:
-{{"prompts":[{{"trend_id":"id","prompt":"complete English image prompt"}}]}}"""
+{{"prompts":[{{"trend_id":"id","pattern_prompt":"standalone artwork prompt","product_prompt":"reference-image product rendering prompt"}}]}}"""
 
     @staticmethod
     def _normalise_candidates(
@@ -1410,6 +1647,24 @@ Schema:
             )
 
     @staticmethod
+    def _pattern_flow_prompt(trend: dict[str, Any]) -> str:
+        return f"""Create one standalone, original, print-ready artwork inspired by this current social trend.
+
+Trending topic: {trend['topic_en']}
+Verified context: {trend['summary_zh']}
+Why it is trending: {trend['why_trending']}
+Visual direction: {trend['visual_brief_en']}
+
+Preserve the recognizable generic subjects, defining action or interaction, and setting. Choose the most suitable format: original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, abstract repeat, geometric motif, or decorative pattern. Icons and abstraction may simplify the event but must remain meaningfully connected to it. Use no logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Output only the finished flat artwork, isolated on a transparent or clean plain background with generous print-safe margins. Do not show a product, mockup, room, frame, hands, clothing, packaging, or merchandising scene."""
+
+    @staticmethod
+    def _product_reference_prompt(product_prompt: str) -> str:
+        return f"""The attached image is the exact finished artwork reference. Reproduce that same artwork on the product without redesigning, replacing, simplifying, recoloring, or adding unrelated graphics. Preserve its subjects, action, composition, palette, linework, and style. Do not display the reference as a separate card or floating image.
+
+Product rendering instructions:
+{product_prompt}"""
+
+    @staticmethod
     def _flow_prompt(trend: dict[str, Any]) -> str:
         return f"""Create a realistic print-on-demand product image inspired by a current worldwide social-media trend.
 
@@ -1419,6 +1674,7 @@ Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
 Requirements:
+- Use the attached generated pattern image as the exact artwork reference. Preserve its subjects, action, composition, palette, and style instead of redesigning it.
 - Render the design printed directly on the single physical product named in the visual direction. If no product is named, choose the best fit from a mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, or poster.
 - Show one main product only, fully visible and easy to inspect. Do not create a collage or show several product types.
 - Make the artwork conform naturally to the product's printable area, curvature, seams, folds, and material. It must look genuinely printed, not digitally pasted on top.
@@ -1443,7 +1699,9 @@ Requirements:
                 """SELECT r.id,r.trigger_type,r.status,r.stage,r.started_at,r.finished_at,
                           r.duration_ms,r.error,r.candidate_count,r.verified_count,
                           r.generated_count,r.failed_count,
-                          (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count
+                          (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count,
+                          (SELECT COUNT(*) FROM pattern_assets a
+                           WHERE a.run_id=r.id AND a.status='success') AS pattern_count
                    FROM runs r ORDER BY r.started_at DESC LIMIT ?""",
                 (min(200, max(1, limit)),),
             ).fetchall()
@@ -1520,12 +1778,35 @@ Requirements:
                         "run": {"id": item["run_id"], "started_at": run_started_at},
                         "date": item["created_at"],
                     })
+            elif pool == "patterns":
+                total = int(db.execute(
+                    "SELECT COUNT(*) FROM pattern_assets WHERE image_path IS NOT NULL"
+                ).fetchone()[0])
+                rows = db.execute(
+                    """SELECT a.*,t.topic_zh,r.started_at AS run_started_at
+                       FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
+                       JOIN runs r ON r.id=a.run_id WHERE a.image_path IS NOT NULL
+                       ORDER BY a.created_at DESC LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                entries = []
+                for row in rows:
+                    item = dict(row)
+                    topic_zh = item.pop("topic_zh")
+                    run_started_at = item.pop("run_started_at")
+                    item["image_url"] = f"/assets/{item['image_path']}"
+                    entries.append({
+                        "item": item,
+                        "trend": {"id": item["trend_id"], "topic_zh": topic_zh},
+                        "run": {"id": item["run_id"], "started_at": run_started_at},
+                        "date": item["created_at"],
+                    })
             elif pool == "images":
                 total = int(db.execute(
                     "SELECT COUNT(*) FROM generations WHERE image_path IS NOT NULL"
                 ).fetchone()[0])
                 rows = db.execute(
-                    """SELECT g.id,g.run_id,g.trend_id,g.prompt_id,g.sequence,g.model,g.prompt,
+                    """SELECT g.id,g.run_id,g.trend_id,g.prompt_id,g.pattern_asset_id,g.sequence,g.model,g.prompt,
                               g.status,g.image_path,g.mime_type,g.duration_ms,g.error,g.created_at,
                               g.finished_at,t.topic_zh,r.started_at AS run_started_at
                        FROM generations g JOIN trends t ON t.id=g.trend_id
@@ -1560,6 +1841,9 @@ Requirements:
             generations = [dict(row) for row in db.execute(
                 "SELECT * FROM generations WHERE run_id = ? ORDER BY created_at", (run_id,)
             ).fetchall()]
+            pattern_assets = [dict(row) for row in db.execute(
+                "SELECT * FROM pattern_assets WHERE run_id=? ORDER BY created_at", (run_id,)
+            ).fetchall()]
             prompt_pool = [dict(row) for row in db.execute(
                 """SELECT p.*, t.topic_zh, t.category FROM prompt_pool p
                    JOIN trends t ON t.id=p.trend_id WHERE p.run_id=? ORDER BY p.created_at""",
@@ -1570,13 +1854,20 @@ Requirements:
             if generation.get("image_path"):
                 generation["image_url"] = f"/assets/{generation['image_path']}"
             generation_map.setdefault(generation["trend_id"], []).append(generation)
+        pattern_map: dict[str, list[dict[str, Any]]] = {}
+        for pattern in pattern_assets:
+            if pattern.get("image_path"):
+                pattern["image_url"] = f"/assets/{pattern['image_path']}"
+            pattern_map.setdefault(pattern["trend_id"], []).append(pattern)
         for trend in trends:
             for key in ("platforms", "evidence", "risk_flags"):
                 trend[key] = json.loads(trend[key])
             trend["generations"] = generation_map.get(trend["id"], [])
+            trend["pattern_assets"] = pattern_map.get(trend["id"], [])
         result = dict(run)
         result["trends"] = trends
         result["prompt_pool"] = prompt_pool
+        result["pattern_assets"] = pattern_assets
         result["raw_trends"] = []
         if result.get("raw_discovery"):
             try:
