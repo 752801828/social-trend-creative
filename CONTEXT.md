@@ -25,7 +25,7 @@ An idempotent import of recent TrendRadar MCP results into the local source-entr
 _Avoid_: Trend acquisition, pipeline run
 
 **Pattern-pool entry**:
-An original, production-safe, product-independent visual translation of a raw trend. The source need not already be visual or printable: events may become abstract patterns, original comic illustrations, symbolic graphics, geometric motifs, or decorative artwork. One raw trend may yield one or multiple entries, and yields none only when no safe, respectful, non-infringing translation is possible.
+An original, production-safe, product-independent visual translation of a raw trend that preserves a recognizable event anchor: generic subjects, defining action or interaction, and setting. Concrete original comic or editorial scenes are preferred; abstraction supports the narrative or replaces it only when literal depiction would be unsafe. Protected identities are generalized without erasing the event. One raw trend may yield one or multiple entries, and yields none only when no safe, respectful, non-infringing translation is possible.
 _Avoid_: Trend-pool entry, candidate, topic
 
 **Prompt-pool entry**:

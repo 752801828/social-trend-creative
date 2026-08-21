@@ -1226,11 +1226,11 @@ Schema:
 Current time: {now}
 Valid lookback: {config['lookback_hours']} hours
 
-Translate the raw trends into original, reusable, production-safe visual directions. Do not require the source event to already be an illustration, aesthetic, meme, merchandise idea, or printable subject. News events, technology, sports, culture, public discussion, and other non-visual topics can become abstract patterns, original comic-style scenes, symbolic editorial illustrations, geometric motifs, decorative emblems, playful icons, or other non-literal artwork. A raw trend may produce one or multiple pattern entries; return zero only when no safe, respectful, non-infringing visual translation is possible. Split distinct motifs, merge duplicate directions, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood.
+Translate the raw trends into original, reusable, production-safe visual directions. Do not require the source event to already be an illustration, aesthetic, meme, merchandise idea, or printable subject. Preserve the event's recognizable narrative anchor: the main type of people or objects, the defining action or conflict, and the setting. A concrete original scene is the default whenever it can be shown safely; abstraction, geometry, symbols, color, and texture should support that scene rather than replace it. News events, technology, sports, culture, public discussion, and other non-visual topics can become original comic scenes, editorial illustrations, stylized narrative graphics, or—only when a concrete depiction would be unsafe—abstract visual metaphors. A raw trend may produce one or multiple pattern entries; return zero only when no safe, respectful, non-infringing visual translation is possible. Split distinct motifs, merge duplicate directions, and assign a concise category such as culture, humor, lifestyle, seasonal, sports, technology, nature, travel, food, pets, or social mood.
 
-The acquisition input intentionally includes every trend type. Do not copy or retain logos, trademarks, copyrighted characters, distinctive existing artwork, public-figure likenesses, hate symbols, explicit/adult imagery, graphic violence, misinformation claims, or unsafe instructions. When a protected or sensitive trend has a meaningful generic underlying mood, shape language, color story, community feeling, or visual metaphor, extract only that non-infringing generic direction without implying endorsement or association; otherwise output no pattern for it. Missing evidence or publication time is not itself a rejection reason.
+The acquisition input intentionally includes every trend type. Do not copy or retain logos, trademarks, copyrighted characters, distinctive existing artwork, public-figure likenesses, hate symbols, explicit/adult imagery, graphic violence, misinformation claims, or unsafe instructions. Genericize protected identity without erasing the event: replace named teams with unbranded athletes in clearly different uniforms, named companies with generic workers or devices, and public figures with non-identifiable roles while retaining the reported action and setting. For example, a story about repeated fights during joint professional-football practices should become two groups of generic American-football players in contrasting unbranded practice uniforms shoving and grappling while teammates separate them on a training field—not a generic football, stripes, or unrelated sports geometry. When a sensitive trend cannot support a respectful concrete scene, use a restrained non-infringing metaphor without implying endorsement or association; otherwise output no pattern. Missing evidence or publication time is not itself a rejection reason.
 
-Every classified_trends item is an accepted pattern-pool entry. It must preserve enough factual context to explain the inspiration, contain a concrete reusable visual motif and mood, have no unresolved risk flags, and remain independent of any physical product. The artwork may interpret the event rather than depict it literally; sensitive events must use restrained, non-graphic visual metaphor and must not trivialize victims or suffering. Do not write the final image prompt or choose a product in this stage. Return strict JSON only.
+Every classified_trends item is an accepted pattern-pool entry. Its topic_en and topic_zh must still identify the source event or action, not merely name an art style or mood. It must preserve enough factual context to explain the inspiration, contain a detailed visual brief with subjects, action, setting, composition, style, palette, and mood, have no unresolved risk flags, and remain independent of any physical product. The artwork may interpret the event rather than reproduce protected identities; sensitive events must use restrained, non-graphic visual metaphor and must not trivialize victims or suffering. Do not write the final image prompt or choose a product in this stage. Return strict JSON only.
 
 Candidates:
 {json.dumps(candidates, ensure_ascii=False)}
@@ -1239,8 +1239,8 @@ Schema:
 {{
   "classified_trends": [
     {{
-      "topic_en":"independent safe pattern direction",
-      "topic_zh":"独立可用图案方向",
+      "topic_en":"recognizable event-linked artwork direction",
+      "topic_zh":"与原热点事件直接相关的图案方向",
       "summary_zh":"事实摘要",
       "why_trending":"传播原因",
       "platforms":["X"],
@@ -1250,7 +1250,7 @@ Schema:
       "engagement_signal":"signal or null",
       "evidence":[],
       "confidence":0.8,
-      "visual_brief_en":"Concrete original visual motif, composition, palette, texture, and mood; not a finished prompt and no product",
+      "visual_brief_en":"Detailed event-linked subjects, defining action, setting, composition, original illustration style, palette, texture, and mood; no protected identity, no product",
       "risk_flags":[]
     }}
   ]
@@ -1262,6 +1262,7 @@ Schema:
             {
                 "trend_id": item["id"],
                 "topic_en": item["topic_en"],
+                "topic_zh": item["topic_zh"],
                 "summary_zh": item["summary_zh"],
                 "why_trending": item["why_trending"],
                 "category": item["category"],
@@ -1271,12 +1272,12 @@ Schema:
         ]
         return f"""You create production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write one complete English prompt for a realistic print-on-demand product rendering. Turn the supplied safe direction into a finished original artwork using the most suitable visual language, such as an abstract repeat, original comic illustration, symbolic editorial graphic, geometric composition, decorative emblem, playful icon system, or stylized poster art. The source topic does not need to be inherently printable and the artwork does not need to depict the event literally. Select one suitable physical item and fully specify the artwork, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral setting. The final image must show the artwork already printed directly on the product, never as separate flat artwork.
+For every input trend_id, write one detailed English prompt of roughly 140–240 words for a realistic print-on-demand product rendering. The printed artwork must remain immediately recognizable as a creative interpretation of that specific source event. Preserve the visual brief's subjects, defining action or interaction, and setting; do not reduce a narrative event to unrelated abstract shapes, a generic category icon, or a color palette. Use a concrete original comic or editorial scene by default. Abstract patterns, symbols, geometry, and decorative elements may frame or enrich the scene, and may replace it only when a concrete depiction would be unsafe or disrespectful. Select one suitable physical item and fully specify the characters or objects, action, setting, composition, illustration style, palette, texture, placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show the artwork already printed directly on the product, never as separate flat artwork.
 
 Rules:
 1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
 2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
-3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
+3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Replace protected identities with generic unbranded equivalents, but keep the event's core action and context recognizable.
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
 5. Return exactly one prompt for every supplied trend_id, preserve every trend_id exactly, and return strict JSON only.
 
@@ -1422,6 +1423,7 @@ Requirements:
 - Show one main product only, fully visible and easy to inspect. Do not create a collage or show several product types.
 - Make the artwork conform naturally to the product's printable area, curvature, seams, folds, and material. It must look genuinely printed, not digitally pasted on top.
 - Use a clean commercial product-photography composition with a simple neutral setting. Keep the product and printed design sharp and unobstructed.
+- Keep the source event recognizable in the printed artwork by retaining its generic subjects, defining action or interaction, and setting. Prefer a concrete original comic or editorial scene; do not collapse a narrative event into unrelated abstract shapes or a generic category icon.
 - Do not include logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork.
 - Avoid text unless the trend cannot work without it; any text must be short, correctly spelled, and generic."""
 
