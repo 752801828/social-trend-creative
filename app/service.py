@@ -1104,7 +1104,9 @@ Schema:
                     sequence,
                     config,
                     prompt_id=item["prompt_id"],
-                    prompt_text=item["pattern_prompt"] or self._pattern_flow_prompt(item),
+                    prompt_text=self._isolated_pattern_prompt(
+                        item["pattern_prompt"] or self._pattern_flow_prompt(item)
+                    ),
                 )
 
         results = await asyncio.gather(*(guarded(item, index) for index, item in enumerate(selected, 1)))
@@ -1517,7 +1519,7 @@ Schema:
         ]
         return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write a pattern_prompt and a product_prompt. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork on a transparent or clean plain background, with no product, mockup, room, frame, hands, or merchandising scene. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, abstract repeat, geometric motif, or decorative pattern. Icons and abstraction are welcome when they still communicate the event; concrete subjects, defining action, and setting remain the default for narrative news.
+For every input trend_id, write a pattern_prompt and a product_prompt. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels: no full-canvas background, scenery extending to the image edges, sky, ground, wall, room, floor, horizon, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, cast shadow, or merchandising scene. Keep transparent negative space around and between design elements. If transparency is technically impossible, use only uniform pure white (#FFFFFF) outside the artwork, never a textured, colored, gradient, or illustrated background. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
 
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
@@ -1665,11 +1667,26 @@ Verified context: {trend['summary_zh']}
 Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
-Preserve the recognizable generic subjects, defining action or interaction, and setting. Choose the most suitable format: original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, abstract repeat, geometric motif, or decorative pattern. Icons and abstraction may simplify the event but must remain meaningfully connected to it. Use no logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Output only the finished flat artwork, isolated on a transparent or clean plain background with generous print-safe margins. Do not show a product, mockup, room, frame, hands, clothing, packaging, or merchandising scene."""
+Preserve the recognizable generic subjects and defining action or interaction. Choose the most suitable format: original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. Icons and abstraction may simplify the event but must remain meaningfully connected to it. Use no logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Output only the printable design pixels as a transparent-background PNG with generous transparent negative space. Do not show or fill the canvas with a sky, ground, wall, room, floor, horizon, landscape, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, clothing, packaging, cast shadow, or merchandising scene. A comic may contain small story cues inside its isolated silhouette or vignette, but never a rectangular background scene. If alpha transparency is technically impossible, leave uniform pure white (#FFFFFF) outside the artwork."""
+
+    @staticmethod
+    def _isolated_pattern_prompt(pattern_prompt: str) -> str:
+        return f"""MANDATORY OUTPUT FORMAT — this overrides any conflicting wording below:
+- Return one flat, print-ready design asset as a transparent-background PNG.
+- Render only the artwork pixels. Every area outside the artwork must be transparent.
+- No full-canvas scene or background; no sky, ground, wall, room, floor, horizon, landscape, photograph, backdrop, gradient, texture, poster rectangle, border, frame, product, mockup, hands, packaging, or cast shadow.
+- Keep generous transparent negative space around the complete design and transparent gaps between separate icons.
+- Story details may appear only as compact internal elements contained inside the design silhouette or vignette, never as a rectangular illustrated scene.
+- If alpha transparency is technically impossible, use uniform pure white (#FFFFFF) only outside the design. Never simulate transparency with a checkerboard.
+
+ARTWORK BRIEF:
+{pattern_prompt}
+
+Final check before output: isolated artwork only, transparent outside pixels, no background and no product."""
 
     @staticmethod
     def _product_reference_prompt(product_prompt: str) -> str:
-        return f"""The attached image is the exact finished artwork reference. Reproduce that same artwork on the product without redesigning, replacing, simplifying, recoloring, or adding unrelated graphics. Preserve its subjects, action, composition, palette, linework, and style. Do not display the reference as a separate card or floating image.
+        return f"""The attached image is the exact finished artwork reference. Reproduce that same artwork on the product without redesigning, replacing, simplifying, recoloring, or adding unrelated graphics. Preserve its subjects, action, composition, palette, linework, and style. Do not display the reference as a separate card or floating image. Transparent pixels are non-printing. If the reference has uniform pure-white space connected to an image edge, treat that outer white space as transparency and do not print it as a white rectangle; preserve intentional enclosed white details inside the artwork.
 
 Product rendering instructions:
 {product_prompt}"""

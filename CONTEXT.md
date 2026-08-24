@@ -33,7 +33,7 @@ A paired standalone-artwork prompt and reference-image product prompt determinis
 _Avoid_: Visual brief
 
 **Pattern asset**:
-A standalone Flow-generated printable artwork—such as an icon, badge, comic, emblem, symbol, abstract repeat, or decorative motif—with no product or mockup. It records its prompt-pool entry.
+A standalone Flow-generated printable artwork—such as an icon, badge, comic, emblem, symbol, abstract repeat, or decorative motif—with transparent pixels outside the design and no product, mockup, full-canvas scene, poster rectangle, frame, backdrop, or cast shadow. Uniform pure white is the only fallback when alpha transparency is technically unavailable. It records its prompt-pool entry.
 
 **Pattern generation task**:
 One Flow text-to-image request for one randomly selected prompt-pool entry and one image model.
