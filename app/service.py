@@ -245,6 +245,7 @@ class TrendService:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_trends_run ON trends(run_id, rank);
+                CREATE INDEX IF NOT EXISTS idx_trends_created ON trends(created_at DESC);
                 CREATE TABLE IF NOT EXISTS prompt_pool (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -256,6 +257,7 @@ class TrendService:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_prompt_pool_run ON prompt_pool(run_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_prompt_pool_created ON prompt_pool(created_at DESC);
                 CREATE TABLE IF NOT EXISTS pattern_assets (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -274,6 +276,7 @@ class TrendService:
                     finished_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_pattern_assets_run ON pattern_assets(run_id, trend_id);
+                CREATE INDEX IF NOT EXISTS idx_pattern_assets_created ON pattern_assets(created_at DESC);
                 CREATE TABLE IF NOT EXISTS generations (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -292,6 +295,7 @@ class TrendService:
                     finished_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_generations_run ON generations(run_id, trend_id);
+                CREATE INDEX IF NOT EXISTS idx_generations_created ON generations(created_at DESC);
                 CREATE TABLE IF NOT EXISTS source_entries (
                     id TEXT PRIMARY KEY,
                     external_id TEXT NOT NULL UNIQUE,
@@ -314,6 +318,12 @@ class TrendService:
                     ON source_entries(published_at DESC, fetched_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_source_entries_source
                     ON source_entries(source_id, published_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_entries_fetched
+                    ON source_entries(fetched_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_entries_display_date
+                    ON source_entries(COALESCE(published_at,fetched_at) DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_entries_source_display_date
+                    ON source_entries(source_id,COALESCE(published_at,fetched_at) DESC);
                 CREATE TABLE IF NOT EXISTS source_sync_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     status TEXT NOT NULL,
@@ -1712,32 +1722,35 @@ Requirements:
         offset = max(0, offset)
         if pool == "acquire":
             with self._connect() as db:
-                runs = [dict(row) for row in db.execute(
+                total = int(db.execute(
+                    "SELECT COALESCE(SUM(candidate_count),0) FROM runs WHERE raw_discovery!=''"
+                ).fetchone()[0])
+                runs = db.execute(
                     """SELECT id,started_at,raw_discovery,candidate_count FROM runs
                        WHERE raw_discovery!='' ORDER BY started_at DESC"""
-                ).fetchall()]
-            entries = []
-            total = sum(int(run["candidate_count"] or 0) for run in runs)
-            skip = offset
-            for run in runs:
-                try:
-                    items = self._normalise_candidates(
-                        extract_json_object(run["raw_discovery"]), None
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    items = []
-                if skip >= len(items):
-                    skip -= len(items)
-                    continue
-                for item in items[skip:]:
-                    entries.append({
-                        "item": item,
-                        "run": {"id": run["id"], "started_at": run["started_at"]},
-                        "date": run["started_at"],
-                    })
-                    if len(entries) >= limit:
-                        return {"entries": entries, "total": total}
-                skip = 0
+                )
+                entries = []
+                skip = offset
+                for row in runs:
+                    run = dict(row)
+                    try:
+                        items = self._normalise_candidates(
+                            extract_json_object(run["raw_discovery"]), None
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        items = []
+                    if skip >= len(items):
+                        skip -= len(items)
+                        continue
+                    for item in items[skip:]:
+                        entries.append({
+                            "item": item,
+                            "run": {"id": run["id"], "started_at": run["started_at"]},
+                            "date": run["started_at"],
+                        })
+                        if len(entries) >= limit:
+                            return {"entries": entries, "total": total}
+                    skip = 0
             return {"entries": entries, "total": total}
 
         with self._connect() as db:
@@ -1900,16 +1913,17 @@ Requirements:
                 "SELECT COUNT(*), COALESCE(SUM(verified_count),0), COALESCE(SUM(generated_count),0) FROM runs WHERE substr(started_at,1,10)=?",
                 (today,),
             ).fetchone()
-            platforms = db.execute("SELECT platforms FROM trends WHERE status != 'rejected'").fetchall()
+            platforms = db.execute(
+                """SELECT p.value AS name, COUNT(*) AS count
+                   FROM trends AS t, json_each(t.platforms) AS p
+                   WHERE t.status!='rejected'
+                   GROUP BY p.value ORDER BY count DESC,name"""
+            ).fetchall()
             source_total = db.execute("SELECT COUNT(*) FROM source_entries").fetchone()[0]
             source_recent = db.execute(
                 "SELECT COUNT(*) FROM source_entries WHERE fetched_at>=?",
                 ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),),
             ).fetchone()[0]
-        platform_counts: dict[str, int] = {}
-        for row in platforms:
-            for platform in json.loads(row["platforms"]):
-                platform_counts[platform] = platform_counts.get(platform, 0) + 1
         return {
             "active_run_id": self.active_run_id,
             "running": bool(self.active_task and not self.active_task.done()),
@@ -1918,10 +1932,7 @@ Requirements:
                 "runs": totals[0], "candidates": totals[1], "verified": totals[2],
                 "generated": totals[3], "failed": totals[4], "avg_duration_ms": round(totals[5] or 0),
             },
-            "platforms": [
-                {"name": name, "count": count}
-                for name, count in sorted(platform_counts.items(), key=lambda item: (-item[1], item[0]))
-            ],
+            "platforms": [dict(row) for row in platforms],
             "sources": {
                 "total_entries": source_total,
                 "recent_entries": source_recent,

@@ -94,7 +94,7 @@ async def health():
 
 
 @app.get("/api/state")
-async def state(limit: int = Query(default=40, ge=1, le=200)):
+def state(limit: int = Query(default=40, ge=1, le=200)):
     return {
         "config": service.get_config(),
         "connections": service.connection_info(),
@@ -107,7 +107,7 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
 
 
 @app.get("/api/sources")
-async def sources():
+def sources():
     return service.source_state()
 
 
@@ -123,7 +123,7 @@ async def sync_sources():
 
 
 @app.get("/api/signals")
-async def signals(
+def signals(
     limit: int = Query(default=200, ge=1, le=1000),
     source_id: str | None = Query(default=None, max_length=200),
     offset: int = Query(default=0, ge=0),
@@ -135,7 +135,7 @@ async def signals(
 
 
 @app.get("/api/cards/{pool}")
-async def pool_cards(
+def pool_cards(
     pool: str,
     limit: int = Query(default=24, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -147,7 +147,7 @@ async def pool_cards(
 
 
 @app.get("/api/signals/{entry_id}")
-async def signal(entry_id: str):
+def signal(entry_id: str):
     entry = service.get_source_entry(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="来源条目不存在")
@@ -207,7 +207,7 @@ async def full_run():
 
 
 @app.get("/api/runs/{run_id}")
-async def get_run(run_id: str):
+def get_run(run_id: str):
     run = service.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="轮次不存在")

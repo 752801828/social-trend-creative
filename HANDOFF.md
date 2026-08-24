@@ -141,6 +141,8 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，热点、视觉方向、提示词、图案资产和产品图使用 `/api/cards/{pool}?limit=24&offset=...`。IntersectionObserver 在距视口约 600px 时获取并追加下一批，图片使用原生 `loading="lazy"` 和 `decoding="async"`。
 
+状态轮询只在页面签名实际变化时重新加载卡片；同一页已有请求尚未返回时不会递增 `moduleLoadToken`，因此慢查询不会被 3 秒运行态轮询连续作废。各卡片表按 `created_at` 建有倒序索引，来源按 `fetched_at` 和 `COALESCE(published_at,fetched_at)` 建有统计及展示顺序索引；`dashboard()` 使用 SQLite `json_each` 直接聚合平台分布，全类型热点分页通过游标按需解析任务 JSON。`/api/state`、卡片、来源和任务详情等同步查询使用普通 FastAPI 路由，由线程池执行。
+
 `list_runs()` 只查询任务摘要字段，禁止重新加入 `raw_discovery` 或 `raw_verification`；完整 AI 响应只由单任务详情读取，避免 `/api/state` 首屏和轮询重复传输大字段。
 
 ## 数据与迁移

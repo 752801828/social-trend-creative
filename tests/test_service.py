@@ -227,6 +227,56 @@ class TrendServiceTests(unittest.TestCase):
         self.assertNotIn("raw_verification", summary)
         self.assertEqual(summary["id"], run_id)
 
+    def test_dashboard_aggregates_platform_counts_and_card_indexes_exist(self):
+        run_id = self.service.create_run("manual")
+        trends = []
+        for index, platforms in enumerate((["X", "Reddit"], ["X"], ["YouTube"]), 1):
+            trend = self._candidate(f"candidate-{index}", f"Trend {index}", "", utc_now())
+            trend.pop("candidate_id")
+            trend.update({
+                "id": f"trend-{index}",
+                "platforms": platforms,
+                "status": "rejected" if index == 3 else "ready",
+                "verification_note": "test",
+            })
+            trends.append(trend)
+        self.service._replace_trends(run_id, trends)
+
+        self.assertEqual(
+            self.service.dashboard()["platforms"],
+            [{"name": "X", "count": 2}, {"name": "Reddit", "count": 1}],
+        )
+        with self.service._connect() as db:
+            indexes = {
+                row["name"] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+            query_plans = " ".join(
+                row["detail"] for sql in (
+                    "SELECT * FROM trends ORDER BY created_at DESC LIMIT 24",
+                    "SELECT * FROM prompt_pool ORDER BY created_at DESC LIMIT 24",
+                    "SELECT * FROM pattern_assets ORDER BY created_at DESC LIMIT 24",
+                    "SELECT * FROM generations ORDER BY created_at DESC LIMIT 24",
+                    "SELECT COUNT(*) FROM source_entries WHERE fetched_at>='2026-01-01'",
+                    "SELECT * FROM source_entries ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT 24",
+                    "SELECT * FROM source_entries WHERE source_id='source' ORDER BY COALESCE(published_at,fetched_at) DESC LIMIT 24",
+                ) for row in db.execute(f"EXPLAIN QUERY PLAN {sql}")
+            )
+        self.assertTrue({
+            "idx_trends_created", "idx_prompt_pool_created",
+            "idx_pattern_assets_created", "idx_generations_created",
+            "idx_source_entries_fetched", "idx_source_entries_display_date",
+            "idx_source_entries_source_display_date",
+        }.issubset(indexes))
+        for index in (
+            "idx_trends_created", "idx_prompt_pool_created",
+            "idx_pattern_assets_created", "idx_generations_created",
+            "idx_source_entries_fetched", "idx_source_entries_display_date",
+            "idx_source_entries_source_display_date",
+        ):
+            self.assertIn(index, query_plans)
+
     def test_invalid_classification_schema_never_promotes_raw_trends(self):
         run_id = self.service.create_run("manual")
         discovery = {
@@ -571,6 +621,8 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('loading="lazy" decoding="async"', self.html)
         self.assertIn("content-visibility:auto", self.html)
         self.assertNotIn("Promise.all(runs.map", self.html)
+        self.assertIn("if(signature===moduleSignature)return;moduleSignature=signature;token=++moduleLoadToken", self.html)
+        self.assertIn("const meta=moduleMeta[currentPage];let token=moduleLoadToken", self.html)
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
         self.assertIn('id="cfgAcquireInterval"', self.html)
