@@ -81,6 +81,7 @@ async def index():
 @app.get("/sources")
 @app.get("/signals")
 @app.get("/trends")
+@app.get("/sellability")
 @app.get("/prompts")
 @app.get("/patterns")
 @app.get("/images")
@@ -139,9 +140,17 @@ def pool_cards(
     pool: str,
     limit: int = Query(default=24, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    q: str = Query(default="", max_length=200),
+    grade: str = Query(default="", max_length=1),
+    category: str = Query(default="", max_length=100),
+    sort: str = Query(default="newest", max_length=20),
+    transparent: str = Query(default="", max_length=3),
 ):
     try:
-        return service.list_pool_cards(pool, limit, offset)
+        return service.list_pool_cards(
+            pool, limit, offset, q=q, grade=grade, category=category,
+            sort=sort, transparent=transparent,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -195,7 +204,7 @@ async def discover():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=False)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "prompt_pool"]}
+    return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "sellability", "prompt_pool"]}
 
 
 @app.post("/api/runs/full", status_code=202)
@@ -234,6 +243,17 @@ async def prompts(run_id: str, request: PoolRequest):
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
     return {"run_id": run_id, "status": "accepted", "count": request.count}
+
+
+@app.post("/api/runs/{run_id}/sellability", status_code=202)
+async def score_sellability(run_id: str):
+    try:
+        launched = service.launch_sellability_scoring(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted"}
 
 
 @app.post("/api/runs/{run_id}/generate", status_code=202)

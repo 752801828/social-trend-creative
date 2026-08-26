@@ -105,6 +105,13 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `docs/PROJECT_OVERVIEW_AND_CHANGELOG.md`：必须持续更新的架构总览与变更日志。
 - `data/`：SQLite 和生成图片，不能进入 Git。
 
+## 2026-08-26 接手说明
+
+- 新增 `sellability_pool` 销售候选池。每个可用热点都会得到七项 AI 商业潜力指标、0–100 分、A/B/C/D 等级、推荐产品、风险和生成配额；评分只用于排序与控制生成数量，不代表真实销量。
+- 图案生成现在强制经过 Pillow 图片处理：无论 Flow 返回 JPG 还是 PNG，都会重新编码为 `.png`；边缘连通背景会被移除，只有检测到 alpha 通道才入库，失败会自动进行一次背景清理重试。
+- 生图配额为 A=3×2、B=1×2、C=1×2、D=1×1（图案数 × 每图案产品图数）。热点、销售候选、图案图库和产品图库支持分页筛选与排序；新增 `/sellability`。
+- 服务机若无法访问 Docker Hub，需先在运行容器执行 `docker exec social-trend-creative pip install --no-cache-dir "Pillow>=10,<12"`，再采用 `docker cp`、`docker commit` 和 `docker compose up -d --force-recreate --no-build` 更新。
+
 ## 管理 API
 
 管理页面和 API 默认不鉴权，浏览器打开页面后自动加载状态。服务端口 `5920` 只应开放在可信内网；公网部署必须在反向代理层补充认证和 HTTPS。
@@ -116,6 +123,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `POST /api/connections/test`
 - `POST /api/runs/discover`：①②③同一轮次顺序执行
 - `POST /api/runs/{run_id}/classify`：②拆分分类
+- `POST /api/runs/{run_id}/sellability`：④计算可卖分、等级、风险和生成配额
 - `POST /api/runs/{run_id}/prompts`：③为全部未处理图案补齐提示词；旧 `count` 参数保留兼容但不参与抽样
 - `POST /api/runs/{run_id}/patterns`：④随机生成独立图案，JSON 为 `{}` 或 `{"count":3}`
 - `POST /api/runs/{run_id}/products`：⑤用未消费图案生成产品图
@@ -130,6 +138,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `/`：全局总览、统计、连接、设置和一键完整流水线。
 - `/sources`：顶部“信息采集”入口；组内标签切换媒体源和 `/signals` 原始资讯，点击来源可筛选其条目。
 - `/acquire`：顶部“AI 创意”入口；组内标签切换全部热点、`/trends` 可用图案和 `/prompts` 生成提示词。
+- `/sellability`：销售候选；展示 AI 可卖分、七项指标、风险、推荐物品和等级配额，点击卡片展开完整判断。
 - `/patterns`：顶部“生图工坊”入口中的图案图库，展示独立图案。
 - `/images`：生图工坊中的产品图库，展示引用实际图案生成的产品图片。
 - TrendRadar `:8080` 入口位于信息采集摘要区；独立关联服务栏、RSSHub 和 NewsNow 入口均已移除。
@@ -140,7 +149,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 
 视觉规范采用 StyleKit `Apple 风格`：`#f5f5f7` 页面背景、白色内容面、`#0071e3` 强调色、`-apple-system` SF Pro 字体栈、8px 卡片圆角和轻阴影；旧日系样式块已停用，不再加载外部字体，植物装饰和纸张纹理不显示。
 
-所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，热点、视觉方向、提示词、图案资产和产品图使用 `/api/cards/{pool}?limit=24&offset=...`。IntersectionObserver 在距视口约 600px 时获取并追加下一批，图片使用原生 `loading="lazy"` 和 `decoding="async"`。
+所有池页面通过共用 `renderLazyCards` 分批渲染，首批和后续批次均为 24 张；原始资讯使用 `/api/signals?limit=24&offset=...`，热点、销售候选、视觉方向、提示词、图案资产和产品图使用 `/api/cards/{pool}?limit=24&offset=...`。热点和图案池支持关键词、分类、等级、可卖分排序，图案池另支持透明 PNG 筛选。IntersectionObserver 在距视口约 600px 时获取并追加下一批，图片使用原生 `loading="lazy"` 和 `decoding="async"`。
 
 状态轮询只在页面签名实际变化时重新加载卡片；同一页已有请求尚未返回时不会递增 `moduleLoadToken`，因此慢查询不会被 3 秒运行态轮询连续作废。各卡片表按 `created_at` 建有倒序索引，来源按 `fetched_at` 和 `COALESCE(published_at,fetched_at)` 建有统计及展示顺序索引；`dashboard()` 使用 SQLite `json_each` 直接聚合平台分布，全类型热点分页通过游标按需解析任务 JSON。`/api/state`、卡片、来源和任务详情等同步查询使用普通 FastAPI 路由，由线程池执行。
 

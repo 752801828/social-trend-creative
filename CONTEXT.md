@@ -53,3 +53,9 @@ _Avoid_: RSS discovery, TrendRadar run
 
 **Priority region**:
 A region Gemini should cover first; worldwide acquisition may still return stronger signals from elsewhere.
+# 2026-08-26 业务补充
+
+- **销售候选（Sellability candidate）**：经过 AI 可卖分估算的热点方向。分数由七项加权指标组成，仅作美国市场商品测试的决策支持。
+- **可卖等级与配额**：A 80–100 分生成 3 个图案、每图案 2 个产品图；B 65–79 分生成 1×2；C 60–64 分生成 1×2；D 0–59 分生成 1×1。低分不删除热点。
+- **真实透明 PNG**：Flow 输出经 Pillow 解码、边缘背景清除和 alpha 检测后统一保存 `.png`；`has_transparency=1` 才表示可直接下载的透明图案。
+- **筛选排序**：热点、销售候选、图案及产品卡片 API 支持关键词、分类、等级和可卖分排序；图案池额外支持透明/未检出筛选，并保持分页懒加载。

@@ -18,12 +18,14 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
+from PIL import Image, ImageChops, ImageDraw
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,16 @@ DEFAULT_CONFIG = {
     "source_retention_days": 30,
     "source_include_hotlists": False,
 }
+
+SELLABILITY_METRICS = (
+    ("shopping_intent", "购买意图", 25),
+    ("social_commercial_heat", "社媒商业热度", 20),
+    ("search_growth", "搜索增长潜力", 15),
+    ("product_fit", "商品适配度", 15),
+    ("audience_clarity", "受众清晰度", 10),
+    ("lifespan", "销售窗口寿命", 10),
+    ("competition_opportunity", "竞争机会", 5),
+)
 
 SOURCE_STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "in",
@@ -242,10 +254,32 @@ class TrendService:
                     risk_flags TEXT NOT NULL,
                     status TEXT NOT NULL,
                     verification_note TEXT NOT NULL DEFAULT '',
+                    source_candidate_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_trends_run ON trends(run_id, rank);
                 CREATE INDEX IF NOT EXISTS idx_trends_created ON trends(created_at DESC);
+                CREATE TABLE IF NOT EXISTS sellability_pool (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    trend_id TEXT NOT NULL UNIQUE REFERENCES trends(id) ON DELETE CASCADE,
+                    total_score INTEGER NOT NULL,
+                    grade TEXT NOT NULL,
+                    metrics TEXT NOT NULL,
+                    target_audience TEXT NOT NULL,
+                    recommended_products TEXT NOT NULL,
+                    valid_window TEXT NOT NULL,
+                    sales_reason TEXT NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    risk_reasons TEXT NOT NULL,
+                    pattern_quota INTEGER NOT NULL,
+                    products_per_pattern INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sellability_run_score
+                    ON sellability_pool(run_id, total_score DESC);
+                CREATE INDEX IF NOT EXISTS idx_sellability_score_created
+                    ON sellability_pool(total_score DESC, created_at DESC);
                 CREATE TABLE IF NOT EXISTS prompt_pool (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -272,6 +306,8 @@ class TrendService:
                     duration_ms INTEGER,
                     error TEXT NOT NULL DEFAULT '',
                     raw_response TEXT NOT NULL DEFAULT '',
+                    has_transparency INTEGER NOT NULL DEFAULT 0,
+                    background_removed INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     finished_at TEXT
                 );
@@ -343,6 +379,17 @@ class TrendService:
             prompt_columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
             if "pattern_prompt" not in prompt_columns:
                 db.execute("ALTER TABLE prompt_pool ADD COLUMN pattern_prompt TEXT NOT NULL DEFAULT ''")
+            trend_columns = {row["name"] for row in db.execute("PRAGMA table_info(trends)")}
+            if "source_candidate_id" not in trend_columns:
+                db.execute("ALTER TABLE trends ADD COLUMN source_candidate_id TEXT NOT NULL DEFAULT ''")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trends_source_candidate ON trends(run_id, source_candidate_id)"
+            )
+            pattern_columns = {row["name"] for row in db.execute("PRAGMA table_info(pattern_assets)")}
+            if "has_transparency" not in pattern_columns:
+                db.execute("ALTER TABLE pattern_assets ADD COLUMN has_transparency INTEGER NOT NULL DEFAULT 0")
+            if "background_removed" not in pattern_columns:
+                db.execute("ALTER TABLE pattern_assets ADD COLUMN background_removed INTEGER NOT NULL DEFAULT 0")
             source_columns = {row["name"] for row in db.execute("PRAGMA table_info(source_entries)")}
             for name in ("title_zh", "summary_zh"):
                 if name not in source_columns:
@@ -730,6 +777,20 @@ class TrendService:
             raise ValueError("没有待生成提示词的可用图案")
         return self._launch(run_id, self._run_stage(run_id, "prompt_pool", count), f"prompts-{run_id}")
 
+    def launch_sellability_scoring(self, run_id: str) -> bool:
+        with self._connect() as db:
+            exists = db.execute(
+                """SELECT 1 FROM trends t WHERE t.run_id=?
+                   AND NOT EXISTS (SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id)
+                   LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+        if not exists:
+            raise ValueError("该任务没有待评分的热点方向")
+        return self._launch(
+            run_id, self._run_stage(run_id, "sellability"), f"sellability-{run_id}"
+        )
+
     def launch_generation(self, run_id: str, count: int | None = None) -> bool:
         with self._connect() as db:
             exists = db.execute(
@@ -756,11 +817,12 @@ class TrendService:
         with self._connect() as db:
             exists = db.execute(
                 """SELECT 1 FROM pattern_assets a
+                   LEFT JOIN sellability_pool s ON s.trend_id=a.trend_id
                    WHERE a.run_id=? AND a.status='success'
-                     AND NOT EXISTS (
-                       SELECT 1 FROM generations g
-                       WHERE g.pattern_asset_id=a.id AND g.status='success'
-                     ) LIMIT 1""",
+                     AND (SELECT COUNT(*) FROM generations g
+                          WHERE g.pattern_asset_id=a.id AND g.status='success')
+                         < COALESCE(s.products_per_pattern,1)
+                   LIMIT 1""",
                 (run_id,),
             ).fetchone()
         if not exists:
@@ -798,6 +860,8 @@ class TrendService:
                     await self._acquire_raw_trends(run_id, config)
                 if stage in {"classification", "full"}:
                     await self._classify_trend_pool(run_id, config)
+                if stage in {"sellability", "full"}:
+                    await self._score_sellability_pool(run_id, config)
                 if stage in {"prompt_pool", "full"}:
                     await self._create_prompt_pool(run_id, config, count)
                 if stage == "pattern_generation":
@@ -1013,6 +1077,145 @@ Schema:
         )
         return usable
 
+    @staticmethod
+    def _sellability_prompt(trends: list[dict[str, Any]]) -> str:
+        compact = [{
+            "trend_id": item["id"],
+            "topic_en": item["topic_en"],
+            "topic_zh": item["topic_zh"],
+            "summary_zh": item["summary_zh"],
+            "why_trending": item["why_trending"],
+            "category": item["category"],
+            "region": item["region"],
+            "engagement_signal": item["engagement_signal"],
+            "confidence": item["confidence"],
+            "risk_flags": json.loads(item["risk_flags"]) if isinstance(item["risk_flags"], str) else item["risk_flags"],
+            "visual_brief_en": item["visual_brief_en"],
+        } for item in trends]
+        maxima = {key: maximum for key, _label, maximum in SELLABILITY_METRICS}
+        return f"""Estimate the print-on-demand sellability of every supplied social-trend artwork direction for the United States market. This is decision support based only on the supplied trend signals, not verified marketplace sales data. Never omit a trend and never reject it because its score is low.
+
+Score every metric as an integer from zero through its stated maximum and give a concrete Chinese judgement explaining that score. Recommend practical printable products, a target audience, expected selling window, concise sales reason, and legal/sensitivity risk. Genericize trademarks, teams, public figures, and protected characters. Return strict JSON only and preserve every trend_id exactly.
+
+Metric maxima:
+{json.dumps(maxima, ensure_ascii=False)}
+
+Trends:
+{json.dumps(compact, ensure_ascii=False)}
+
+Schema:
+{{"scores":[{{"trend_id":"id","metrics":{{"shopping_intent":{{"score":0,"judgement":"中文判断"}},"social_commercial_heat":{{"score":0,"judgement":"中文判断"}},"search_growth":{{"score":0,"judgement":"中文判断"}},"product_fit":{{"score":0,"judgement":"中文判断"}},"audience_clarity":{{"score":0,"judgement":"中文判断"}},"lifespan":{{"score":0,"judgement":"中文判断"}},"competition_opportunity":{{"score":0,"judgement":"中文判断"}}}},"target_audience":"目标人群","recommended_products":["T-shirt"],"valid_window":"建议销售窗口","sales_reason":"为什么可能卖得动","risk_level":"low|medium|high","risk_reasons":["风险与规避方式"]}}]}}"""
+
+    @staticmethod
+    def _normalise_sellability_item(raw: dict[str, Any] | None) -> dict[str, Any]:
+        source = raw if isinstance(raw, dict) else {}
+        raw_metrics = source.get("metrics") if isinstance(source.get("metrics"), dict) else {}
+        metrics = []
+        for key, label, maximum in SELLABILITY_METRICS:
+            value = raw_metrics.get(key)
+            value = value if isinstance(value, dict) else {}
+            try:
+                score = int(round(float(value.get("score", 0))))
+            except (TypeError, ValueError):
+                score = 0
+            score = min(maximum, max(0, score))
+            metrics.append({
+                "key": key,
+                "label": label,
+                "score": score,
+                "max_score": maximum,
+                "judgement": str(value.get("judgement") or "模型未提供判断，按保守值处理")[:1000],
+            })
+        total = sum(item["score"] for item in metrics)
+        if total >= 80:
+            grade, pattern_quota, products_per_pattern = "A", 3, 2
+        elif total >= 65:
+            grade, pattern_quota, products_per_pattern = "B", 1, 2
+        elif total >= 60:
+            grade, pattern_quota, products_per_pattern = "C", 1, 2
+        else:
+            grade, pattern_quota, products_per_pattern = "D", 1, 1
+        products = string_list(source.get("recommended_products"), limit=8, item_limit=100)
+        return {
+            "total_score": total,
+            "grade": grade,
+            "metrics": metrics,
+            "target_audience": str(source.get("target_audience") or "需要进一步验证的美国泛兴趣人群")[:1000],
+            "recommended_products": products or ["T-shirt"],
+            "valid_window": str(source.get("valid_window") or "短期测试，依据点击与收藏数据复核")[:500],
+            "sales_reason": str(source.get("sales_reason") or "信息不足，建议以小样测试验证")[:1500],
+            "risk_level": str(source.get("risk_level") or "medium").lower()[:20],
+            "risk_reasons": string_list(source.get("risk_reasons"), limit=20, item_limit=500),
+            "pattern_quota": pattern_quota,
+            "products_per_pattern": products_per_pattern,
+        }
+
+    @classmethod
+    def _fallback_sellability(cls) -> dict[str, Any]:
+        return cls._normalise_sellability_item({
+            "metrics": {
+                key: {"score": maximum // 2, "judgement": "AI评分缺失，使用保守中位估算；上架前需人工验证"}
+                for key, _label, maximum in SELLABILITY_METRICS
+            },
+            "risk_level": "medium",
+            "risk_reasons": ["缺少完整 AI 商业判断，先以最小生成配额测试"],
+        })
+
+    async def _score_sellability_pool(
+        self, run_id: str, config: dict[str, Any]
+    ) -> list[str]:
+        with self._connect() as db:
+            trends = [dict(row) for row in db.execute(
+                """SELECT t.* FROM trends t WHERE t.run_id=? AND t.status!='rejected'
+                   AND NOT EXISTS (SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id)
+                   ORDER BY t.rank""",
+                (run_id,),
+            ).fetchall()]
+        if not trends:
+            raise ValueError("没有待评分的热点方向")
+        self._update_run(run_id, status="running", stage="sellability_scoring", error="")
+        supplied: dict[str, dict[str, Any]] = {}
+        batch_size = int(config["candidate_count"])
+        for offset in range(0, len(trends), batch_size):
+            batch = trends[offset:offset + batch_size]
+            try:
+                response = await self._call_gemini(
+                    self._sellability_prompt(batch),
+                    config["gemini_verification_model"],
+                    attempts=2,
+                )
+                payload = extract_json_object(response)
+                scores = payload.get("scores") if isinstance(payload.get("scores"), list) else []
+                supplied.update({
+                    str(item.get("trend_id")): item
+                    for item in scores if isinstance(item, dict) and item.get("trend_id")
+                })
+            except Exception as exc:
+                logger.warning("Sellability scoring batch failed: %s", safe_error(exc))
+        ids = []
+        with self._connect() as db:
+            for trend in trends:
+                score = (
+                    self._normalise_sellability_item(supplied[trend["id"]])
+                    if trend["id"] in supplied else self._fallback_sellability()
+                )
+                item_id = secrets.token_hex(12)
+                db.execute(
+                    """INSERT OR REPLACE INTO sellability_pool
+                       (id,run_id,trend_id,total_score,grade,metrics,target_audience,
+                        recommended_products,valid_window,sales_reason,risk_level,risk_reasons,
+                        pattern_quota,products_per_pattern,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, run_id, trend["id"], score["total_score"], score["grade"],
+                     json_text(score["metrics"]), score["target_audience"],
+                     json_text(score["recommended_products"]), score["valid_window"],
+                     score["sales_reason"], score["risk_level"], json_text(score["risk_reasons"]),
+                     score["pattern_quota"], score["products_per_pattern"], utc_now()),
+                )
+                ids.append(item_id)
+        self._update_run(run_id, status="sellability_pool_ready", stage="sellability_pool")
+        return ids
+
     async def _create_prompt_pool(
         self,
         run_id: str,
@@ -1074,7 +1277,7 @@ Schema:
         if not pattern_ids:
             raise RuntimeError("Flow没有成功生成图案")
         await self._generate_products_from_patterns(
-            run_id, config, len(pattern_ids), pattern_ids=pattern_ids
+            run_id, config, None, pattern_ids=pattern_ids
         )
 
     async def _generate_pattern_assets(
@@ -1085,14 +1288,24 @@ Schema:
     ) -> list[str]:
         with self._connect() as db:
             prompts = [dict(row) for row in db.execute(
-                """SELECT t.*, p.id AS prompt_id, p.pattern_prompt
+                """SELECT t.*, p.id AS prompt_id, p.pattern_prompt,
+                          COALESCE(s.total_score,0) AS sell_score,
+                          COALESCE(s.pattern_quota,1) AS pattern_quota,
+                          (SELECT COUNT(*) FROM pattern_assets a
+                           WHERE a.trend_id=t.id AND a.status='success') AS existing_patterns
                    FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
+                   LEFT JOIN sellability_pool s ON s.trend_id=t.id
                    WHERE p.run_id=? AND p.status='ready'""",
                 (run_id,),
             ).fetchall()]
-        if not prompts:
+        candidates = []
+        for prompt in prompts:
+            candidates.extend([prompt] * max(0, prompt["pattern_quota"] - prompt["existing_patterns"]))
+        if not candidates:
             raise ValueError("提示词池为空，请先生成提示词池")
-        selected = random.sample(prompts, min(len(prompts), max(1, count or config["images_per_trend"])))
+        random.shuffle(candidates)
+        candidates.sort(key=lambda item: item["sell_score"], reverse=True)
+        selected = candidates[:min(len(candidates), max(1, count or config["images_per_trend"]))]
         self._update_run(run_id, status="running", stage="pattern_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
@@ -1136,21 +1349,33 @@ Schema:
                 params.extend(pattern_ids)
             patterns = [dict(row) for row in db.execute(
                 f"""SELECT a.*,t.topic_en,t.topic_zh,t.summary_zh,t.why_trending,t.visual_brief_en,
-                           t.status AS trend_status,p.prompt AS product_prompt
+                           t.status AS trend_status,p.prompt AS product_prompt,
+                           COALESCE(s.total_score,0) AS sell_score,
+                           COALESCE(s.products_per_pattern,1) AS products_per_pattern,
+                           COALESCE(s.recommended_products,'[]') AS recommended_products,
+                           (SELECT COUNT(*) FROM generations g
+                            WHERE g.pattern_asset_id=a.id AND g.status='success') AS existing_products
                     FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
                     JOIN prompt_pool p ON p.id=a.prompt_id
+                    LEFT JOIN sellability_pool s ON s.trend_id=a.trend_id
                     WHERE a.run_id=? AND a.status='success'{pattern_filter}
-                      AND NOT EXISTS (
-                        SELECT 1 FROM generations g
-                        WHERE g.pattern_asset_id=a.id AND g.status='success'
-                      )""",
+                    """,
                 params,
             ).fetchall()]
-        if not patterns:
+        candidates = []
+        for pattern in patterns:
+            try:
+                pattern["product_choices"] = json.loads(pattern["recommended_products"])
+            except (TypeError, json.JSONDecodeError):
+                pattern["product_choices"] = []
+            for slot in range(pattern["existing_products"], pattern["products_per_pattern"]):
+                candidates.append({**pattern, "product_slot": slot})
+        if not candidates:
             raise ValueError("没有待生成产品图的图案，请先生成图案")
-        selected = random.sample(
-            patterns, min(len(patterns), max(1, count or config["images_per_trend"]))
-        )
+        random.shuffle(candidates)
+        candidates.sort(key=lambda item: item["sell_score"], reverse=True)
+        limit = len(candidates) if pattern_ids and count is None else max(1, count or config["images_per_trend"])
+        selected = candidates[:min(len(candidates), limit)]
         self._update_run(run_id, status="running", stage="product_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
@@ -1165,7 +1390,9 @@ Schema:
                     config,
                     prompt_id=item["prompt_id"],
                     prompt_text=self._product_reference_prompt(
-                        item["product_prompt"] or self._flow_prompt(item)
+                        item["product_prompt"] or self._flow_prompt(item),
+                        item["product_choices"][item["product_slot"] % len(item["product_choices"])]
+                        if item["product_choices"] else None,
                     ),
                     pattern_asset_id=item["id"],
                     reference_image=reference,
@@ -1192,6 +1419,62 @@ Schema:
         )
         await self._notify_run(run_id)
 
+    @staticmethod
+    def _prepare_pattern_png(image_bytes: bytes) -> tuple[bytes, bool, bool]:
+        """Decode any supported image and return a real PNG with edge background removed."""
+        with Image.open(BytesIO(image_bytes)) as opened:
+            image = opened.convert("RGBA")
+        original_alpha = image.getchannel("A")
+        already_transparent = original_alpha.getextrema()[0] < 255
+        background_removed = False
+        if not already_transparent:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            border = []
+            step_x = max(1, width // 200)
+            step_y = max(1, height // 200)
+            border.extend(rgb.getpixel((x, 0)) for x in range(0, width, step_x))
+            border.extend(rgb.getpixel((x, height - 1)) for x in range(0, width, step_x))
+            border.extend(rgb.getpixel((0, y)) for y in range(0, height, step_y))
+            border.extend(rgb.getpixel((width - 1, y)) for y in range(0, height, step_y))
+            buckets: dict[tuple[int, int, int], int] = {}
+            for pixel in border:
+                bucket = tuple(min(255, (value // 16) * 16 + 8) for value in pixel)
+                buckets[bucket] = buckets.get(bucket, 0) + 1
+            dominant, count = max(buckets.items(), key=lambda item: item[1])
+            if count / max(1, len(border)) >= 0.28:
+                diff_rgb = ImageChops.difference(rgb, Image.new("RGB", rgb.size, dominant))
+                channels = diff_rgb.split()
+                difference = ImageChops.lighter(ImageChops.lighter(channels[0], channels[1]), channels[2])
+                connected = difference.point(lambda value: 255 if value <= 72 else 0)
+                draw = ImageDraw.Draw(connected)
+                for x in range(width):
+                    if connected.getpixel((x, 0)) == 255:
+                        ImageDraw.floodfill(connected, (x, 0), 128, thresh=0)
+                    if connected.getpixel((x, height - 1)) == 255:
+                        ImageDraw.floodfill(connected, (x, height - 1), 128, thresh=0)
+                for y in range(height):
+                    if connected.getpixel((0, y)) == 255:
+                        ImageDraw.floodfill(connected, (0, y), 128, thresh=0)
+                    if connected.getpixel((width - 1, y)) == 255:
+                        ImageDraw.floodfill(connected, (width - 1, y), 128, thresh=0)
+                del draw
+                connected_mask = connected.point(lambda value: 255 if value == 128 else 0)
+                soft_alpha = difference.point(
+                    lambda value: 0 if value <= 18 else 255 if value >= 72 else round((value - 18) * 255 / 54)
+                )
+                alpha = Image.composite(soft_alpha, Image.new("L", rgb.size, 255), connected_mask)
+                image.putalpha(ImageChops.multiply(original_alpha, alpha))
+                background_removed = image.getchannel("A").getextrema()[0] < 255
+        output = BytesIO()
+        image.save(output, format="PNG", optimize=True)
+        has_transparency = image.getchannel("A").getextrema()[0] < 255
+        return output.getvalue(), has_transparency, background_removed
+
+    @staticmethod
+    def _background_removal_prompt() -> str:
+        return """Edit the attached artwork into an isolated print asset. Preserve the artwork exactly, but remove every background pixel outside the design and return a true transparent-background PNG with an alpha channel. Keep intentional enclosed white details. Do not add a checkerboard, product, scene, shadow, frame, border, text, or new objects."""
+
     async def _generate_pattern_one(
         self,
         run_id: str,
@@ -1216,17 +1499,27 @@ Schema:
             db.execute("UPDATE trends SET status='generating' WHERE id=?", (trend["id"],))
         try:
             response_text, image_bytes, mime_type = await self._call_flow(prompt_text, model)
-            suffix = mimetypes.guess_extension(mime_type) or ".png"
-            relative = Path(run_id) / trend["id"] / f"pattern-{asset_id}{suffix}"
+            png_bytes, has_transparency, background_removed = self._prepare_pattern_png(image_bytes)
+            if not has_transparency:
+                retry_text, retry_bytes, _retry_mime = await self._call_flow(
+                    self._background_removal_prompt(), model, (image_bytes, mime_type)
+                )
+                png_bytes, has_transparency, retry_removed = self._prepare_pattern_png(retry_bytes)
+                background_removed = background_removed or retry_removed
+                response_text = f"{response_text}\n[background-removal-retry]\n{retry_text}"
+            if not has_transparency:
+                raise RuntimeError("图案未形成真实透明通道，已拒绝保存；请重试生图")
+            relative = Path(run_id) / trend["id"] / f"pattern-{asset_id}.png"
             target = self.assets_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(image_bytes)
+            target.write_bytes(png_bytes)
             duration = round((time.perf_counter() - started) * 1000)
             with self._connect() as db:
                 db.execute(
                     """UPDATE pattern_assets SET status='success',image_path=?,mime_type=?,duration_ms=?,
-                       raw_response=?,finished_at=? WHERE id=?""",
-                    (relative.as_posix(), mime_type, duration, response_text[:20000], utc_now(), asset_id),
+                       raw_response=?,has_transparency=?,background_removed=?,finished_at=? WHERE id=?""",
+                    (relative.as_posix(), "image/png", duration, response_text[:20000],
+                     int(has_transparency), int(background_removed), utc_now(), asset_id),
                 )
                 db.execute("UPDATE trends SET status='pattern_generated' WHERE id=?", (trend["id"],))
             return asset_id
@@ -1486,6 +1779,7 @@ Schema:
 {{
   "classified_trends": [
     {{
+      "source_candidate_id":"preserve the input candidate_id exactly",
       "topic_en":"recognizable event-linked artwork direction",
       "topic_zh":"与原热点事件直接相关的图案方向",
       "summary_zh":"事实摘要",
@@ -1554,7 +1848,9 @@ Schema:
                 continue
             evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
             result.append({
-                "candidate_id": f"candidate-{index}",
+                "candidate_id": str(
+                    raw.get("source_candidate_id") or raw.get("candidate_id") or f"candidate-{index}"
+                )[:100],
                 "rank": index,
                 "topic_en": topic_en[:300],
                 "topic_zh": topic_zh[:300],
@@ -1632,7 +1928,7 @@ Schema:
         output = []
         for candidate in candidates:
             item = copy.deepcopy(candidate)
-            item.pop("candidate_id", None)
+            item["source_candidate_id"] = str(item.pop("candidate_id", ""))[:100]
             item["id"] = secrets.token_hex(12)
             item["status"] = "ready"
             item["verification_note"] = "AI已提取可用图案并分类"
@@ -1646,15 +1942,15 @@ Schema:
                 """INSERT INTO trends
                    (id, run_id, rank, topic_en, topic_zh, summary_zh, why_trending, platforms,
                     region, category, first_seen_at, engagement_signal, evidence, confidence,
-                    visual_brief_en, risk_flags, status, verification_note, created_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    visual_brief_en, risk_flags, status, verification_note, source_candidate_id, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(
                     item["id"], run_id, item["rank"], item["topic_en"], item["topic_zh"],
                     item["summary_zh"], item["why_trending"], json_text(item["platforms"]),
                     item["region"], item["category"], item["first_seen_at"],
                     str(item["engagement_signal"] or ""), json_text(item["evidence"]),
                     item["confidence"], item["visual_brief_en"], json_text(item["risk_flags"]),
-                    item["status"], item["verification_note"], utc_now(),
+                    item["status"], item["verification_note"], item.get("source_candidate_id", ""), utc_now(),
                 ) for item in trends],
             )
 
@@ -1685,11 +1981,12 @@ ARTWORK BRIEF:
 Final check before output: isolated artwork only, transparent outside pixels, no background and no product."""
 
     @staticmethod
-    def _product_reference_prompt(product_prompt: str) -> str:
+    def _product_reference_prompt(product_prompt: str, preferred_product: str | None = None) -> str:
         return f"""The attached image is the exact finished artwork reference. Reproduce that same artwork on the product without redesigning, replacing, simplifying, recoloring, or adding unrelated graphics. Preserve its subjects, action, composition, palette, linework, and style. Do not display the reference as a separate card or floating image. Transparent pixels are non-printing. If the reference has uniform pure-white space connected to an image edge, treat that outer white space as transparency and do not print it as a white rectangle; preserve intentional enclosed white details inside the artwork.
 
 Product rendering instructions:
-{product_prompt}"""
+{product_prompt}
+{f'Render this variation specifically on one {preferred_product}.' if preferred_product else ''}"""
 
     @staticmethod
     def _flow_prompt(trend: dict[str, Any]) -> str:
@@ -1727,6 +2024,7 @@ Requirements:
                           r.duration_ms,r.error,r.candidate_count,r.verified_count,
                           r.generated_count,r.failed_count,
                           (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count,
+                          (SELECT COUNT(*) FROM sellability_pool s WHERE s.run_id=r.id) AS sellability_count,
                           (SELECT COUNT(*) FROM pattern_assets a
                            WHERE a.run_id=r.id AND a.status='success') AS pattern_count
                    FROM runs r ORDER BY r.started_at DESC LIMIT ?""",
@@ -1734,7 +2032,7 @@ Requirements:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_pool_cards(self, pool: str, limit: int = 24, offset: int = 0) -> dict[str, Any]:
+    def _list_pool_cards_legacy(self, pool: str, limit: int = 24, offset: int = 0) -> dict[str, Any]:
         limit = min(100, max(1, limit))
         offset = max(0, offset)
         if pool == "acquire":
@@ -1860,6 +2158,170 @@ Requirements:
                 raise ValueError("未知卡片池")
         return {"entries": entries, "total": total}
 
+    @staticmethod
+    def _sellability_record(row: dict[str, Any], prefix: str = "") -> dict[str, Any] | None:
+        if row.get(f"{prefix}total_score") is None:
+            return None
+        result = {
+            "id": row.get(f"{prefix}id"),
+            "total_score": int(row[f"{prefix}total_score"]),
+            "grade": row[f"{prefix}grade"],
+            "pattern_quota": int(row[f"{prefix}pattern_quota"]),
+            "products_per_pattern": int(row[f"{prefix}products_per_pattern"]),
+        }
+        for key in ("metrics", "recommended_products", "risk_reasons"):
+            value = row.get(f"{prefix}{key}")
+            if value is not None:
+                try:
+                    result[key] = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    result[key] = []
+        for key in ("target_audience", "valid_window", "sales_reason", "risk_level", "created_at"):
+            value = row.get(f"{prefix}{key}")
+            if value is not None:
+                result[key] = value
+        return result
+
+    def list_pool_cards(
+        self,
+        pool: str,
+        limit: int = 24,
+        offset: int = 0,
+        *,
+        q: str = "",
+        grade: str = "",
+        category: str = "",
+        sort: str = "newest",
+        transparent: str = "",
+    ) -> dict[str, Any]:
+        limit = min(100, max(1, limit))
+        offset = max(0, offset)
+        q = q.strip()[:200]
+        grade = grade.strip().upper()[:1]
+        category = category.strip()[:100]
+        sort = sort if sort in {"newest", "score_desc", "score_asc"} else "newest"
+        if pool == "prompts" and not any((q, grade, category, transparent)) and sort == "newest":
+            return self._list_pool_cards_legacy(pool, limit, offset)
+
+        score_select = """s.id AS sell_id,s.total_score AS sell_total_score,
+            s.grade AS sell_grade,s.pattern_quota AS sell_pattern_quota,
+            s.products_per_pattern AS sell_products_per_pattern"""
+        if pool == "acquire":
+            all_entries = []
+            with self._connect() as db:
+                scores: dict[tuple[str, str], dict[str, Any]] = {}
+                for score_row in db.execute(
+                    f"""SELECT t.run_id,t.source_candidate_id,{score_select}
+                        FROM trends t LEFT JOIN sellability_pool s ON s.trend_id=t.id
+                        WHERE t.source_candidate_id!=''"""
+                ):
+                    record = self._sellability_record(dict(score_row), "sell_")
+                    key = (score_row["run_id"], score_row["source_candidate_id"])
+                    if record and (key not in scores or record["total_score"] > scores[key]["total_score"]):
+                        scores[key] = record
+                runs = db.execute(
+                    """SELECT id,started_at,raw_discovery FROM runs
+                       WHERE raw_discovery!='' ORDER BY started_at DESC"""
+                ).fetchall()
+            for row in runs:
+                try:
+                    items = self._normalise_candidates(extract_json_object(row["raw_discovery"]), None)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                for item in items:
+                    item["sellability"] = scores.get((row["id"], item["candidate_id"]))
+                    haystack = f"{item['topic_zh']} {item['topic_en']} {item['summary_zh']}".casefold()
+                    if q and q.casefold() not in haystack:
+                        continue
+                    if category and item["category"] != category:
+                        continue
+                    if grade and (not item["sellability"] or item["sellability"]["grade"] != grade):
+                        continue
+                    all_entries.append({
+                        "item": item,
+                        "run": {"id": row["id"], "started_at": row["started_at"]},
+                        "date": row["started_at"],
+                    })
+            if sort.startswith("score"):
+                all_entries.sort(
+                    key=lambda entry: (entry["item"].get("sellability") or {}).get("total_score", -1),
+                    reverse=sort == "score_desc",
+                )
+            return {"entries": all_entries[offset:offset + limit], "total": len(all_entries)}
+
+        table_map = {
+            "trends": ("trends t", "t.id", "t.created_at", "t.topic_zh", "t.category"),
+            "patterns": ("pattern_assets a JOIN trends t ON t.id=a.trend_id", "a.id", "a.created_at", "t.topic_zh", "t.category"),
+            "images": ("generations g JOIN trends t ON t.id=g.trend_id", "g.id", "g.created_at", "t.topic_zh", "t.category"),
+            "sellability": ("sellability_pool s JOIN trends t ON t.id=s.trend_id", "s.id", "s.created_at", "t.topic_zh", "t.category"),
+        }
+        if pool not in table_map:
+            return self._list_pool_cards_legacy(pool, limit, offset)
+        table, _id_column, created_column, title_column, category_column = table_map[pool]
+        if pool != "sellability":
+            table += " LEFT JOIN sellability_pool s ON s.trend_id=t.id"
+        table += " JOIN runs r ON r.id=t.run_id"
+        where = []
+        params: list[Any] = []
+        if pool in {"patterns", "images"}:
+            alias = "a" if pool == "patterns" else "g"
+            where.append(f"{alias}.image_path IS NOT NULL")
+        if q:
+            where.append(f"({title_column} LIKE ? OR t.topic_en LIKE ? OR t.summary_zh LIKE ?)")
+            params.extend([f"%{q}%"] * 3)
+        if grade:
+            where.append("s.grade=?")
+            params.append(grade)
+        if category:
+            where.append(f"{category_column}=?")
+            params.append(category)
+        if pool == "patterns" and transparent in {"yes", "no"}:
+            where.append("a.has_transparency=?")
+            params.append(1 if transparent == "yes" else 0)
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+        order_sql = {
+            "newest": f"{created_column} DESC",
+            "score_desc": "COALESCE(s.total_score,-1) DESC, " + created_column + " DESC",
+            "score_asc": "COALESCE(s.total_score,-1) ASC, " + created_column + " DESC",
+        }[sort]
+        if pool == "sellability":
+            select = "s.*,t.topic_en,t.topic_zh,t.summary_zh,t.category,t.region,t.source_candidate_id,r.started_at AS run_started_at"
+        elif pool == "trends":
+            select = f"t.*,r.started_at AS run_started_at,{score_select}"
+        else:
+            alias = "a" if pool == "patterns" else "g"
+            select = f"{alias}.*,t.topic_zh,t.category,r.started_at AS run_started_at,{score_select}"
+        with self._connect() as db:
+            total = int(db.execute(f"SELECT COUNT(*) FROM {table}{where_sql}", params).fetchone()[0])
+            rows = db.execute(
+                f"SELECT {select} FROM {table}{where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        entries = []
+        for source_row in rows:
+            item = dict(source_row)
+            run_started_at = item.pop("run_started_at")
+            if pool == "sellability":
+                for key in ("metrics", "recommended_products", "risk_reasons"):
+                    item[key] = json.loads(item[key])
+                trend = {key: item.pop(key) for key in ("topic_en", "topic_zh", "summary_zh", "category", "region", "source_candidate_id")}
+                entries.append({"item": item, "trend": trend, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
+                continue
+            sellability = self._sellability_record(item, "sell_")
+            for key in list(item):
+                if key.startswith("sell_"):
+                    item.pop(key)
+            item["sellability"] = sellability
+            if pool == "trends":
+                for key in ("platforms", "evidence", "risk_flags"):
+                    item[key] = json.loads(item[key])
+                entries.append({"item": item, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
+            else:
+                topic_zh, item_category = item.pop("topic_zh"), item.pop("category")
+                item["image_url"] = f"/assets/{item['image_path']}"
+                entries.append({"item": item, "trend": {"id": item["trend_id"], "topic_zh": topic_zh, "category": item_category}, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
+        return {"entries": entries, "total": total}
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             run = db.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -1879,6 +2341,15 @@ Requirements:
                    JOIN trends t ON t.id=p.trend_id WHERE p.run_id=? ORDER BY p.created_at""",
                 (run_id,),
             ).fetchall()]
+            sellability_pool = [dict(row) for row in db.execute(
+                "SELECT * FROM sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
+                (run_id,),
+            ).fetchall()]
+        score_map = {}
+        for score in sellability_pool:
+            for key in ("metrics", "recommended_products", "risk_reasons"):
+                score[key] = json.loads(score[key])
+            score_map[score["trend_id"]] = score
         generation_map: dict[str, list[dict[str, Any]]] = {}
         for generation in generations:
             if generation.get("image_path"):
@@ -1894,16 +2365,29 @@ Requirements:
                 trend[key] = json.loads(trend[key])
             trend["generations"] = generation_map.get(trend["id"], [])
             trend["pattern_assets"] = pattern_map.get(trend["id"], [])
+            trend["sellability"] = score_map.get(trend["id"])
         result = dict(run)
         result["trends"] = trends
         result["prompt_pool"] = prompt_pool
         result["pattern_assets"] = pattern_assets
+        result["sellability_pool"] = sellability_pool
         result["raw_trends"] = []
         if result.get("raw_discovery"):
             try:
                 result["raw_trends"] = self._normalise_candidates(
                     extract_json_object(result["raw_discovery"]), None
                 )
+                raw_scores: dict[str, dict[str, Any]] = {}
+                for trend in trends:
+                    source_id = trend.get("source_candidate_id")
+                    score = trend.get("sellability")
+                    if source_id and score and (
+                        source_id not in raw_scores
+                        or score["total_score"] > raw_scores[source_id]["total_score"]
+                    ):
+                        raw_scores[source_id] = score
+                for raw in result["raw_trends"]:
+                    raw["sellability"] = raw_scores.get(raw["candidate_id"])
             except (TypeError, ValueError, json.JSONDecodeError):
                 logger.warning("Run %s contains an unreadable raw discovery response", run_id)
         return result
