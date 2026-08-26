@@ -192,6 +192,10 @@ class TrendService:
         self.operation_lock = asyncio.Lock()
         self.active_task: asyncio.Task | None = None
         self.active_run_id: str | None = None
+        self.sellability_backfill = {
+            "status": "idle", "total_runs": 0, "completed_runs": 0,
+            "current_run_id": "", "error": "", "updated_at": utc_now(),
+        }
         self.source_sync_task: asyncio.Task | None = None
         self.source_sync_lock = asyncio.Lock()
         self.scheduler_task: asyncio.Task | None = None
@@ -800,6 +804,8 @@ class TrendService:
         )
 
     def launch_sellability_backfill(self) -> bool:
+        if self.active_task and not self.active_task.done():
+            return False
         with self._connect() as db:
             run_ids = [row["run_id"] for row in db.execute(
                 """SELECT t.run_id,MAX(t.created_at) AS latest
@@ -809,6 +815,10 @@ class TrendService:
             ).fetchall()]
         if not run_ids:
             raise ValueError("历史热点已经全部完成可卖分计算")
+        self.sellability_backfill = {
+            "status": "pending", "total_runs": len(run_ids), "completed_runs": 0,
+            "current_run_id": run_ids[0], "error": "", "updated_at": utc_now(),
+        }
         return self._launch(
             run_ids[0], self._backfill_sellability(run_ids), "sellability-backfill"
         )
@@ -816,7 +826,11 @@ class TrendService:
     async def _backfill_sellability(self, run_ids: list[str]) -> None:
         async with self.operation_lock:
             try:
-                for run_id in run_ids:
+                self.sellability_backfill["status"] = "running"
+                self.sellability_backfill["updated_at"] = utc_now()
+                for index, run_id in enumerate(run_ids, 1):
+                    self.sellability_backfill["current_run_id"] = run_id
+                    self.sellability_backfill["updated_at"] = utc_now()
                     with self._connect() as db:
                         previous = db.execute(
                             "SELECT status,stage,finished_at FROM runs WHERE id=?", (run_id,)
@@ -829,8 +843,34 @@ class TrendService:
                             stage=previous["stage"],
                             finished_at=previous["finished_at"],
                         )
+                    self.sellability_backfill["completed_runs"] = index
+                    self.sellability_backfill["updated_at"] = utc_now()
+                self.sellability_backfill["status"] = "succeeded"
+                self.sellability_backfill["current_run_id"] = ""
+                self.sellability_backfill["updated_at"] = utc_now()
+            except Exception as exc:
+                self.sellability_backfill["status"] = "failed"
+                self.sellability_backfill["error"] = safe_error(exc)
+                self.sellability_backfill["updated_at"] = utc_now()
+                logger.exception("Sellability backfill failed")
             finally:
                 self.active_run_id = None
+
+    def sellability_state(self) -> dict[str, Any]:
+        with self._connect() as db:
+            totals = db.execute(
+                """SELECT COUNT(*),
+                          SUM(EXISTS(SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id))
+                   FROM trends t WHERE t.status!='rejected'"""
+            ).fetchone()
+        total = int(totals[0] or 0)
+        scored = int(totals[1] or 0)
+        return {
+            **self.sellability_backfill,
+            "total_directions": total,
+            "scored_directions": scored,
+            "pending_directions": max(0, total - scored),
+        }
 
     def launch_generation(self, run_id: str, count: int | None = None) -> bool:
         with self._connect() as db:

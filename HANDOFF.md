@@ -110,6 +110,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 新增 `sellability_pool` 销售候选池。每个可用热点都会得到七项 AI 商业潜力指标、0–100 分、A/B/C/D 等级、推荐产品、风险和生成配额；评分只用于排序与控制生成数量，不代表真实销量。
 - 图案生成现在使用 `Pillow + rembg/u2netp`：先清除纯色边缘，检测到假透明、棋盘格或不透明边缘时直接提取前景，再重新编码为 `.png`；只有检测到 alpha 通道才入库。模型固定保存在 `/app/data/rembg/u2netp.onnx`。
 - 旧任务不会凭空出现评分；`POST /api/sellability/backfill` 和销售候选页“补算历史评分”会一次补齐所有缺分方向，并保留原任务终态。
+- `/api/state.sellability` 返回全部/已评分/待评分方向数、当前任务、历史任务总数和完成数；销售候选页用它展示实时补算进度、完成状态或错误。每完成一个任务，该任务的评分卡立即可见。
 - 生图配额为 A=3×2、B=1×2、C=1×2、D=1×1（图案数 × 每图案产品图数）。热点、销售候选、图案图库和产品图库支持分页筛选与排序；新增 `/sellability`。
 - 服务机若无法访问 Docker Hub，需先在运行容器执行 `docker exec social-trend-creative pip install --no-cache-dir "Pillow>=10,<12"`，再采用 `docker cp`、`docker commit` 和 `docker compose up -d --force-recreate --no-build` 更新。
 

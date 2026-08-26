@@ -478,6 +478,11 @@ class TrendServiceTests(unittest.TestCase):
         run = self.service.get_run(run_id)
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["sellability_pool"][0]["total_score"], 100)
+        progress = self.service.sellability_state()
+        self.assertEqual(progress["status"], "succeeded")
+        self.assertEqual(progress["completed_runs"], 1)
+        self.assertEqual(progress["scored_directions"], 1)
+        self.assertEqual(progress["pending_directions"], 0)
 
     def test_generation_schedule_runs_without_acquisition_schedule(self):
         run_id = self.service.create_run("manual")
@@ -775,6 +780,9 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("rembg[cpu]", requirements)
         self.assertIn("/api/sellability/backfill", self.html)
         self.assertIn("补算历史评分", self.html)
+        self.assertIn("评分进度：", self.html)
+        self.assertIn("scored_directions", self.html)
+        self.assertIn('"sellability": service.sellability_state()', main)
         self.assertIn("REMBG_MODEL=u2netp", (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"))
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
