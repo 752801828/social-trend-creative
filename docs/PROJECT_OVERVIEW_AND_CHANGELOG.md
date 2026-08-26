@@ -167,3 +167,4 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 依赖新增 `Pillow>=10,<12`；服务机无 Docker Hub 网络时需先在运行容器安装 Pillow，再使用 `docker cp`、`docker commit` 和 `docker compose up -d --force-recreate --no-build` 更新。
 - 将复杂背景与“画出来的棋盘格”交给开源 `rembg` 直接抠图：使用轻量 `u2netp` 会话缓存，模型存放在持久化 `U2NET_HOME=/app/data/rembg`；Pillow 边缘清理后透明边界不足时才调用 rembg，避免每张图都承担模型推理成本。AI 二次背景清理调用已移除。
 - 新增 `POST /api/sellability/backfill` 和销售候选页“补算历史评分”，按日期倒序为全部旧任务补齐缺少的 `sellability_pool` 记录，同时恢复其原完成/失败状态；明确服务机未部署新提交或旧任务未补算时评分为空属于数据未生成，不是显示层丢失。
+- Compose 固定注入 `U2NET_HOME=/app/data/rembg` 与 `REMBG_MODEL=u2netp`，旧服务机 `.env` 无需追加字段，模型文件随现有 `./data:/app/data` 挂载持久化。
