@@ -60,4 +60,5 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 - **真实透明 PNG**：Flow 输出先做边缘清理；假透明、棋盘格或边缘仍不透明时由 `rembg/u2netp` 提取前景，再经 Pillow alpha 检测后统一保存 `.png`；`has_transparency=1` 才表示可直接下载。
 - **历史评分补算（Sellability backfill）**：为引入销售候选池之前创建的任务补齐评分；新任务自动评分，旧任务必须通过补算入口生成 `sellability_pool` 记录。
 - **评分进度（Sellability progress）**：`/api/state.sellability` 中的持久数据计数加进程内任务状态；显示全部、已评分、待评分方向和当前历史任务。服务重启后任务状态回到 idle，但数据库计数仍准确。
+- **原始热点评分（Raw sellability score）**：可卖分首先关联 `run_id + candidate_id`，不依赖图案池；`raw_sellability_pool` 是销售候选的事实来源，后续图案方向通过 `source_candidate_id` 继承配额。
 - **筛选排序**：热点、销售候选、图案及产品卡片 API 支持关键词、分类、等级和可卖分排序；图案池额外支持透明/未检出筛选，并保持分页懒加载。

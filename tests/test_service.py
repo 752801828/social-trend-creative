@@ -140,6 +140,12 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("vehicle spare-tire cover", flow_prompt)
         self.assertIn("not digitally pasted", flow_prompt)
         self.assertIn("Keep the source event recognizable", flow_prompt)
+        sellability_prompt = self.service._sellability_prompt([trend])
+        self.assertIn("identity expression, commemoration, gifting", sellability_prompt)
+        self.assertIn("independent-source coverage", sellability_prompt)
+        self.assertIn("do not invent search-volume data", sellability_prompt)
+        self.assertIn("live competitor listings are unavailable", sellability_prompt)
+        self.assertIn("Every judgement must cite concrete facts or limitations", sellability_prompt)
 
     def test_invalid_model_confidence_does_not_break_discovery(self):
         payload = {"trends": [{"topic_en": "Topic", "confidence": "unknown", "platforms": "X"}]}
@@ -424,10 +430,6 @@ class TrendServiceTests(unittest.TestCase):
 
     def test_sellability_pool_supports_score_sorting_and_grade_filter(self):
         run_id = self.service.create_run("manual")
-        trend = self._candidate("candidate-1", "Sellable trend", "", None)
-        trend.pop("candidate_id")
-        trend.update({"id": "trend-1", "status": "ready", "verification_note": "test"})
-        self.service._replace_trends(run_id, [trend])
         score = self.service._normalise_sellability_item({
             "metrics": {
                 key: {"score": maximum, "judgement": "strong"}
@@ -437,12 +439,13 @@ class TrendServiceTests(unittest.TestCase):
         })
         with self.service._connect() as db:
             db.execute(
-                """INSERT INTO sellability_pool
-                   (id,run_id,trend_id,total_score,grade,metrics,target_audience,
-                    recommended_products,valid_window,sales_reason,risk_level,risk_reasons,
-                    pattern_quota,products_per_pattern,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("score-1", run_id, "trend-1", score["total_score"], score["grade"],
+                """INSERT INTO raw_sellability_pool
+                   (id,run_id,candidate_id,topic_en,topic_zh,summary_zh,category,region,
+                    total_score,grade,metrics,target_audience,recommended_products,valid_window,
+                    sales_reason,risk_level,risk_reasons,pattern_quota,products_per_pattern,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("score-1", run_id, "candidate-1", "Sellable trend", "可卖热点", "summary",
+                 "sports", "US", score["total_score"], score["grade"],
                  json.dumps(score["metrics"]), "fans", json.dumps(score["recommended_products"]),
                  "now", "reason", "low", "[]", score["pattern_quota"],
                  score["products_per_pattern"], utc_now()),
@@ -454,17 +457,17 @@ class TrendServiceTests(unittest.TestCase):
 
     def test_sellability_backfill_scores_old_runs_and_preserves_terminal_status(self):
         run_id = self.service.create_run("manual")
-        trend = self._candidate("candidate-1", "Old trend", "", None)
-        trend.pop("candidate_id")
-        trend.update({"id": "trend-old", "status": "ready", "verification_note": "old"})
-        self.service._replace_trends(run_id, [trend])
-        self.service._update_run(run_id, status="completed", stage="finished", finished_at=utc_now())
+        raw = {"trends": [{"topic_en": "Old trend", "topic_zh": "旧热点", "evidence": []}]}
+        self.service._update_run(
+            run_id, raw_discovery=json.dumps(raw), candidate_count=1,
+            status="completed", stage="finished", finished_at=utc_now(),
+        )
 
         async def exercise():
             async def fake_gemini(prompt, _model, *, attempts):
-                self.assertIn("trend-old", prompt)
+                self.assertIn("candidate-1", prompt)
                 return json.dumps({"scores": [{
-                    "trend_id": "trend-old",
+                    "trend_id": "candidate-1",
                     "metrics": {
                         key: {"score": maximum, "judgement": "strong"}
                         for key, _label, maximum in SELLABILITY_METRICS
@@ -477,7 +480,7 @@ class TrendServiceTests(unittest.TestCase):
         asyncio.run(exercise())
         run = self.service.get_run(run_id)
         self.assertEqual(run["status"], "completed")
-        self.assertEqual(run["sellability_pool"][0]["total_score"], 100)
+        self.assertEqual(run["raw_sellability_pool"][0]["total_score"], 100)
         progress = self.service.sellability_state()
         self.assertEqual(progress["status"], "succeeded")
         self.assertEqual(progress["completed_runs"], 1)
@@ -793,6 +796,18 @@ class StaticPageTests(unittest.TestCase):
         ):
             self.assertIn(rule, self.html)
         self.assertIn('class="score-rules"', self.html)
+        for judgement in (
+            "身份表达、纪念、赠礼或即时购买动机",
+            "多来源覆盖、讨论速度和互动信号",
+            "事件新鲜度、关键词可识别性和后续发酵空间",
+            "是否醒目、易印刷并适配杯子、服装、手机壳",
+            "兴趣人群、社群和使用场景是否具体",
+            "一日新闻、阶段性话题、周期事件还是常青兴趣",
+            "是否过度饱和以及能否形成差异",
+            "每项必须给出该热点的具体评分理由",
+        ):
+            self.assertIn(judgement, self.html)
+        self.assertIn('id="sellabilityRules"', self.html)
         self.assertIn("REMBG_MODEL=u2netp", (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"))
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):

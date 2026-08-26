@@ -112,6 +112,8 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 旧任务不会凭空出现评分；`POST /api/sellability/backfill` 和销售候选页“补算历史评分”会一次补齐所有缺分方向，并保留原任务终态。
 - `/api/state.sellability` 返回全部/已评分/待评分方向数、当前任务、历史任务总数和完成数；销售候选页用它展示实时补算进度、完成状态或错误。每完成一个任务，该任务的评分卡立即可见。
 - 销售候选页提供原生 `<details>` 评分规则面板，列出七项权重、A–D 区间和生图配额，并声明服务端汇总总分、低分不删除及 AI 估算边界。
+- 可卖分主对象已改为原始热点：`raw_sellability_pool` 用 `(run_id,candidate_id)` 保存评分，即使任务还没有 `trends` 也能补算和展示；图案方向再按 `source_candidate_id` 继承评分与配额。进度中的总数是历史原始热点数，不是可用图案方向数。
+- 评分规则面板逐项写明判断内容、商业原因和通用强弱分档；每张评分卡的 `metrics[].judgement` 是模型针对该热点生成的实际评分理由。
 - 生图配额为 A=3×2、B=1×2、C=1×2、D=1×1（图案数 × 每图案产品图数）。热点、销售候选、图案图库和产品图库支持分页筛选与排序；新增 `/sellability`。
 - 服务机若无法访问 Docker Hub，需先在运行容器执行 `docker exec social-trend-creative pip install --no-cache-dir "Pillow>=10,<12"`，再采用 `docker cp`、`docker commit` 和 `docker compose up -d --force-recreate --no-build` 更新。
 

@@ -292,6 +292,33 @@ class TrendService:
                     ON sellability_pool(run_id, total_score DESC);
                 CREATE INDEX IF NOT EXISTS idx_sellability_score_created
                     ON sellability_pool(total_score DESC, created_at DESC);
+                CREATE TABLE IF NOT EXISTS raw_sellability_pool (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    candidate_id TEXT NOT NULL,
+                    topic_en TEXT NOT NULL,
+                    topic_zh TEXT NOT NULL,
+                    summary_zh TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    region TEXT NOT NULL,
+                    total_score INTEGER NOT NULL,
+                    grade TEXT NOT NULL,
+                    metrics TEXT NOT NULL,
+                    target_audience TEXT NOT NULL,
+                    recommended_products TEXT NOT NULL,
+                    valid_window TEXT NOT NULL,
+                    sales_reason TEXT NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    risk_reasons TEXT NOT NULL,
+                    pattern_quota INTEGER NOT NULL,
+                    products_per_pattern INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, candidate_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_raw_sellability_run
+                    ON raw_sellability_pool(run_id, candidate_id);
+                CREATE INDEX IF NOT EXISTS idx_raw_sellability_score
+                    ON raw_sellability_pool(total_score DESC, created_at DESC);
                 CREATE TABLE IF NOT EXISTS prompt_pool (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -807,11 +834,11 @@ class TrendService:
         if self.active_task and not self.active_task.done():
             return False
         with self._connect() as db:
-            run_ids = [row["run_id"] for row in db.execute(
-                """SELECT t.run_id,MAX(t.created_at) AS latest
-                   FROM trends t LEFT JOIN sellability_pool s ON s.trend_id=t.id
-                   WHERE t.status!='rejected' AND s.id IS NULL
-                   GROUP BY t.run_id ORDER BY latest DESC"""
+            run_ids = [row["id"] for row in db.execute(
+                """SELECT r.id FROM runs r
+                   WHERE r.raw_discovery!='' AND r.candidate_count>
+                         (SELECT COUNT(*) FROM raw_sellability_pool s WHERE s.run_id=r.id)
+                   ORDER BY r.started_at DESC"""
             ).fetchall()]
         if not run_ids:
             raise ValueError("历史热点已经全部完成可卖分计算")
@@ -859,9 +886,9 @@ class TrendService:
     def sellability_state(self) -> dict[str, Any]:
         with self._connect() as db:
             totals = db.execute(
-                """SELECT COUNT(*),
-                          SUM(EXISTS(SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id))
-                   FROM trends t WHERE t.status!='rejected'"""
+                """SELECT COALESCE(SUM(candidate_count),0),
+                          (SELECT COUNT(*) FROM raw_sellability_pool)
+                   FROM runs WHERE raw_discovery!=''"""
             ).fetchone()
         total = int(totals[0] or 0)
         scored = int(totals[1] or 0)
@@ -1174,12 +1201,23 @@ Schema:
             "visual_brief_en": item["visual_brief_en"],
         } for item in trends]
         maxima = {key: maximum for key, _label, maximum in SELLABILITY_METRICS}
-        return f"""Estimate the print-on-demand sellability of every supplied social-trend artwork direction for the United States market. This is decision support based only on the supplied trend signals, not verified marketplace sales data. Never omit a trend and never reject it because its score is low.
+        return f"""Estimate the print-on-demand sellability of every supplied social trend or artwork direction for the United States market. This is decision support based only on the supplied trend signals, not verified marketplace sales data. Never omit a trend and never reject it because its score is low.
 
 Score every metric as an integer from zero through its stated maximum and give a concrete Chinese judgement explaining that score. Recommend practical printable products, a target audience, expected selling window, concise sales reason, and legal/sensitivity risk. Genericize trademarks, teams, public figures, and protected characters. Return strict JSON only and preserve every trend_id exactly.
 
 Metric maxima:
 {json.dumps(maxima, ensure_ascii=False)}
+
+Judgement rubric:
+- shopping_intent (25): identity expression, commemoration, gifting, collectability, or an immediate reason to buy; explain the concrete purchase motive.
+- social_commercial_heat (20): independent-source coverage, discussion velocity, engagement signal, and short-term shareability; explain which supplied signals support the score.
+- search_growth (15): freshness, recognizable search terms, and room for continued attention; do not invent search-volume data.
+- product_fit (15): whether a recognizable, printable visual can read clearly on mugs, apparel, phone cases, or similar products without protected IP.
+- audience_clarity (10): whether a specific interest group, community, buyer identity, or use occasion can be named.
+- lifespan (10): distinguish one-day news, short-lived discussion, recurring/seasonal events, and evergreen interests; explain the expected window.
+- competition_opportunity (5): estimate differentiation and saturation only from the supplied topic; explicitly note that live competitor listings are unavailable.
+
+For each metric, use the same percentage bands against that metric's maximum: 0–20% no meaningful signal, 21–40% weak, 41–60% moderate, 61–80% strong, 81–100% very strong. Every judgement must cite concrete facts or limitations from the supplied trend and explain why they justify that score. Never state invented sales, search-volume, listing-count, or conversion figures.
 
 Trends:
 {json.dumps(compact, ensure_ascii=False)}
@@ -1242,9 +1280,103 @@ Schema:
             "risk_reasons": ["缺少完整 AI 商业判断，先以最小生成配额测试"],
         })
 
+    async def _score_raw_sellability_pool(
+        self, run_id: str, config: dict[str, Any]
+    ) -> list[str]:
+        with self._connect() as db:
+            row = db.execute("SELECT raw_discovery FROM runs WHERE id=?", (run_id,)).fetchone()
+            existing = {
+                value["candidate_id"] for value in db.execute(
+                    "SELECT candidate_id FROM raw_sellability_pool WHERE run_id=?", (run_id,)
+                ).fetchall()
+            }
+        if not row or not row["raw_discovery"]:
+            return []
+        candidates = self._normalise_candidates(
+            extract_json_object(row["raw_discovery"]), None
+        )
+        missing = [item for item in candidates if item["candidate_id"] not in existing]
+        if not missing:
+            return []
+        supplied: dict[str, dict[str, Any]] = {}
+        batch_size = int(config["candidate_count"])
+        for offset in range(0, len(missing), batch_size):
+            batch = [{**item, "id": item["candidate_id"]} for item in missing[offset:offset + batch_size]]
+            try:
+                response = await self._call_gemini(
+                    self._sellability_prompt(batch),
+                    config["gemini_verification_model"],
+                    attempts=2,
+                )
+                payload = extract_json_object(response)
+                scores = payload.get("scores") if isinstance(payload.get("scores"), list) else []
+                supplied.update({
+                    str(item.get("trend_id")): item
+                    for item in scores if isinstance(item, dict) and item.get("trend_id")
+                })
+            except Exception as exc:
+                logger.warning("Raw sellability scoring batch failed: %s", safe_error(exc))
+        ids = []
+        with self._connect() as db:
+            for candidate in missing:
+                score = (
+                    self._normalise_sellability_item(supplied[candidate["candidate_id"]])
+                    if candidate["candidate_id"] in supplied else self._fallback_sellability()
+                )
+                item_id = secrets.token_hex(12)
+                db.execute(
+                    """INSERT OR REPLACE INTO raw_sellability_pool
+                       (id,run_id,candidate_id,topic_en,topic_zh,summary_zh,category,region,
+                        total_score,grade,metrics,target_audience,recommended_products,
+                        valid_window,sales_reason,risk_level,risk_reasons,pattern_quota,
+                        products_per_pattern,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, run_id, candidate["candidate_id"], candidate["topic_en"],
+                     candidate["topic_zh"], candidate["summary_zh"], candidate["category"],
+                     candidate["region"], score["total_score"], score["grade"],
+                     json_text(score["metrics"]), score["target_audience"],
+                     json_text(score["recommended_products"]), score["valid_window"],
+                     score["sales_reason"], score["risk_level"], json_text(score["risk_reasons"]),
+                     score["pattern_quota"], score["products_per_pattern"], utc_now()),
+                )
+                ids.append(item_id)
+        return ids
+
+    def _copy_raw_sellability_to_trends(self, run_id: str) -> list[str]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT t.id AS trend_id,r.* FROM trends t
+                   JOIN raw_sellability_pool r
+                     ON r.run_id=t.run_id AND r.candidate_id=t.source_candidate_id
+                   WHERE t.run_id=? AND NOT EXISTS (
+                     SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id
+                   )""",
+                (run_id,),
+            ).fetchall()
+            ids = []
+            for source in rows:
+                item_id = secrets.token_hex(12)
+                db.execute(
+                    """INSERT INTO sellability_pool
+                       (id,run_id,trend_id,total_score,grade,metrics,target_audience,
+                        recommended_products,valid_window,sales_reason,risk_level,risk_reasons,
+                        pattern_quota,products_per_pattern,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, run_id, source["trend_id"], source["total_score"], source["grade"],
+                     source["metrics"], source["target_audience"], source["recommended_products"],
+                     source["valid_window"], source["sales_reason"], source["risk_level"],
+                     source["risk_reasons"], source["pattern_quota"],
+                     source["products_per_pattern"], utc_now()),
+                )
+                ids.append(item_id)
+        return ids
+
     async def _score_sellability_pool(
         self, run_id: str, config: dict[str, Any]
     ) -> list[str]:
+        self._update_run(run_id, status="running", stage="sellability_scoring", error="")
+        raw_ids = await self._score_raw_sellability_pool(run_id, config)
+        copied_ids = self._copy_raw_sellability_to_trends(run_id)
         with self._connect() as db:
             trends = [dict(row) for row in db.execute(
                 """SELECT t.* FROM trends t WHERE t.run_id=? AND t.status!='rejected'
@@ -1253,8 +1385,10 @@ Schema:
                 (run_id,),
             ).fetchall()]
         if not trends:
-            raise ValueError("没有待评分的热点方向")
-        self._update_run(run_id, status="running", stage="sellability_scoring", error="")
+            if raw_ids or copied_ids:
+                self._update_run(run_id, status="sellability_pool_ready", stage="sellability_pool")
+                return raw_ids + copied_ids
+            raise ValueError("该任务的热点已经全部完成可卖分计算")
         supplied: dict[str, dict[str, Any]] = {}
         batch_size = int(config["candidate_count"])
         for offset in range(0, len(trends), batch_size):
@@ -1295,7 +1429,7 @@ Schema:
                 )
                 ids.append(item_id)
         self._update_run(run_id, status="sellability_pool_ready", stage="sellability_pool")
-        return ids
+        return raw_ids + copied_ids + ids
 
     async def _create_prompt_pool(
         self,
@@ -2322,9 +2456,8 @@ Requirements:
             with self._connect() as db:
                 scores: dict[tuple[str, str], dict[str, Any]] = {}
                 for score_row in db.execute(
-                    f"""SELECT t.run_id,t.source_candidate_id,{score_select}
-                        FROM trends t LEFT JOIN sellability_pool s ON s.trend_id=t.id
-                        WHERE t.source_candidate_id!=''"""
+                    f"""SELECT s.run_id,s.candidate_id AS source_candidate_id,{score_select}
+                        FROM raw_sellability_pool s"""
                 ):
                     record = self._sellability_record(dict(score_row), "sell_")
                     key = (score_row["run_id"], score_row["source_candidate_id"])
@@ -2364,21 +2497,24 @@ Requirements:
             "trends": ("trends t", "t.id", "t.created_at", "t.topic_zh", "t.category"),
             "patterns": ("pattern_assets a JOIN trends t ON t.id=a.trend_id", "a.id", "a.created_at", "t.topic_zh", "t.category"),
             "images": ("generations g JOIN trends t ON t.id=g.trend_id", "g.id", "g.created_at", "t.topic_zh", "t.category"),
-            "sellability": ("sellability_pool s JOIN trends t ON t.id=s.trend_id", "s.id", "s.created_at", "t.topic_zh", "t.category"),
+            "sellability": ("raw_sellability_pool s", "s.id", "s.created_at", "s.topic_zh", "s.category"),
         }
         if pool not in table_map:
             return self._list_pool_cards_legacy(pool, limit, offset)
         table, _id_column, created_column, title_column, category_column = table_map[pool]
         if pool != "sellability":
             table += " LEFT JOIN sellability_pool s ON s.trend_id=t.id"
-        table += " JOIN runs r ON r.id=t.run_id"
+            table += " JOIN runs r ON r.id=t.run_id"
+        else:
+            table += " JOIN runs r ON r.id=s.run_id"
         where = []
         params: list[Any] = []
         if pool in {"patterns", "images"}:
             alias = "a" if pool == "patterns" else "g"
             where.append(f"{alias}.image_path IS NOT NULL")
         if q:
-            where.append(f"({title_column} LIKE ? OR t.topic_en LIKE ? OR t.summary_zh LIKE ?)")
+            text_alias = "s" if pool == "sellability" else "t"
+            where.append(f"({title_column} LIKE ? OR {text_alias}.topic_en LIKE ? OR {text_alias}.summary_zh LIKE ?)")
             params.extend([f"%{q}%"] * 3)
         if grade:
             where.append("s.grade=?")
@@ -2396,7 +2532,7 @@ Requirements:
             "score_asc": "COALESCE(s.total_score,-1) ASC, " + created_column + " DESC",
         }[sort]
         if pool == "sellability":
-            select = "s.*,t.topic_en,t.topic_zh,t.summary_zh,t.category,t.region,t.source_candidate_id,r.started_at AS run_started_at"
+            select = "s.*,r.started_at AS run_started_at"
         elif pool == "trends":
             select = f"t.*,r.started_at AS run_started_at,{score_select}"
         else:
@@ -2415,7 +2551,8 @@ Requirements:
             if pool == "sellability":
                 for key in ("metrics", "recommended_products", "risk_reasons"):
                     item[key] = json.loads(item[key])
-                trend = {key: item.pop(key) for key in ("topic_en", "topic_zh", "summary_zh", "category", "region", "source_candidate_id")}
+                trend = {key: item.pop(key) for key in ("topic_en", "topic_zh", "summary_zh", "category", "region")}
+                trend["source_candidate_id"] = item["candidate_id"]
                 entries.append({"item": item, "trend": trend, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
                 continue
             sellability = self._sellability_record(item, "sell_")
@@ -2456,11 +2593,20 @@ Requirements:
                 "SELECT * FROM sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
                 (run_id,),
             ).fetchall()]
+            raw_sellability_pool = [dict(row) for row in db.execute(
+                "SELECT * FROM raw_sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
+                (run_id,),
+            ).fetchall()]
         score_map = {}
         for score in sellability_pool:
             for key in ("metrics", "recommended_products", "risk_reasons"):
                 score[key] = json.loads(score[key])
             score_map[score["trend_id"]] = score
+        raw_score_map = {}
+        for score in raw_sellability_pool:
+            for key in ("metrics", "recommended_products", "risk_reasons"):
+                score[key] = json.loads(score[key])
+            raw_score_map[score["candidate_id"]] = score
         generation_map: dict[str, list[dict[str, Any]]] = {}
         for generation in generations:
             if generation.get("image_path"):
@@ -2482,13 +2628,14 @@ Requirements:
         result["prompt_pool"] = prompt_pool
         result["pattern_assets"] = pattern_assets
         result["sellability_pool"] = sellability_pool
+        result["raw_sellability_pool"] = raw_sellability_pool
         result["raw_trends"] = []
         if result.get("raw_discovery"):
             try:
                 result["raw_trends"] = self._normalise_candidates(
                     extract_json_object(result["raw_discovery"]), None
                 )
-                raw_scores: dict[str, dict[str, Any]] = {}
+                raw_scores: dict[str, dict[str, Any]] = dict(raw_score_map)
                 for trend in trends:
                     source_id = trend.get("source_candidate_id")
                     score = trend.get("sellability")
