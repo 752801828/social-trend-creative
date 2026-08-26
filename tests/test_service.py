@@ -783,6 +783,16 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("评分进度：", self.html)
         self.assertIn("scored_directions", self.html)
         self.assertIn('"sellability": service.sellability_state()', main)
+        self.assertIn("查看评分规则与生图配额", self.html)
+        for rule in (
+            "购买意图 <b>25分", "社媒商业热度 <b>20分",
+            "搜索增长潜力 <b>15分", "商品适配度 <b>15分",
+            "受众清晰度 <b>10分", "销售窗口寿命 <b>10分",
+            "竞争机会 <b>5分", "A · 80–100：3图案 × 2产品",
+            "D · 0–59：1图案 × 1产品", "不采用模型自报总分",
+        ):
+            self.assertIn(rule, self.html)
+        self.assertIn('class="score-rules"', self.html)
         self.assertIn("REMBG_MODEL=u2netp", (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"))
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
