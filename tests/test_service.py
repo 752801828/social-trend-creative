@@ -123,6 +123,13 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("attached generated pattern image as the exact artwork reference", pool_prompt)
         self.assertIn("icon set, emblem, badge", pool_prompt)
         self.assertIn("generic unbranded equivalents", pool_prompt)
+        sellability_prompt = self.service._sellability_prompt([trend])
+        self.assertIn("identity expression, commemoration, gifting", sellability_prompt)
+        self.assertIn("independent-source coverage, discussion velocity", sellability_prompt)
+        self.assertIn("recognizable search terms", sellability_prompt)
+        self.assertIn("live competitor listings are unavailable", sellability_prompt)
+        self.assertIn("Every judgement must cite concrete facts", sellability_prompt)
+        self.assertIn("Never state invented sales, search-volume", sellability_prompt)
         pattern_flow_prompt = self.service._pattern_flow_prompt(trend)
         self.assertIn("standalone, original, print-ready artwork", pattern_flow_prompt)
         self.assertIn("transparent-background PNG", pattern_flow_prompt)
@@ -486,6 +493,57 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(progress["completed_runs"], 1)
         self.assertEqual(progress["scored_directions"], 1)
         self.assertEqual(progress["pending_directions"], 0)
+        acquire = self.service.list_pool_cards("acquire")
+        self.assertEqual(acquire["entries"][0]["item"]["sellability"]["total_score"], 100)
+        candidates = self.service.list_pool_cards("sellability")
+        self.assertEqual(candidates["entries"][0]["trend"]["topic_zh"], "旧热点")
+
+    def test_startup_repairs_zero_candidate_count_for_old_raw_runs(self):
+        run_id = self.service.create_run("manual")
+        self.service._update_run(
+            run_id,
+            raw_discovery=json.dumps({"trends": [
+                {"topic_en": "One"}, {"topic_en": "Two"},
+            ]}),
+            candidate_count=0,
+        )
+        repaired = TrendService()
+        try:
+            run = next(item for item in repaired.list_runs() if item["id"] == run_id)
+            self.assertEqual(run["candidate_count"], 2)
+            self.assertEqual(repaired.sellability_state()["total_directions"], 2)
+        finally:
+            asyncio.run(repaired.http.aclose())
+
+    def test_raw_sellability_is_copied_to_classified_direction_quota(self):
+        run_id = self.service.create_run("manual")
+        score = self.service._normalise_sellability_item({
+            "metrics": {
+                key: {"score": maximum, "judgement": "strong"}
+                for key, _label, maximum in SELLABILITY_METRICS
+            }
+        })
+        with self.service._connect() as db:
+            db.execute(
+                """INSERT INTO raw_sellability_pool
+                   (id,run_id,candidate_id,topic_en,topic_zh,summary_zh,category,region,
+                    total_score,grade,metrics,target_audience,recommended_products,valid_window,
+                    sales_reason,risk_level,risk_reasons,pattern_quota,products_per_pattern,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("raw-score", run_id, "candidate-1", "Topic", "热点", "summary", "sports", "US",
+                 100, "A", json.dumps(score["metrics"]), "fans", '["T-shirt"]', "now",
+                 "reason", "low", "[]", 3, 2, utc_now()),
+            )
+        trend = self._candidate("candidate-1", "Direction", "", None)
+        trend.pop("candidate_id")
+        trend.update({
+            "id": "trend-linked", "source_candidate_id": "candidate-1",
+            "status": "ready", "verification_note": "linked",
+        })
+        self.service._replace_trends(run_id, [trend])
+        self.service._copy_raw_sellability_to_trends(run_id)
+        linked = self.service.get_run(run_id)["trends"][0]["sellability"]
+        self.assertEqual((linked["grade"], linked["pattern_quota"], linked["products_per_pattern"]), ("A", 3, 2))
 
     def test_generation_schedule_runs_without_acquisition_schedule(self):
         run_id = self.service.create_run("manual")
@@ -796,6 +854,17 @@ class StaticPageTests(unittest.TestCase):
         ):
             self.assertIn(rule, self.html)
         self.assertIn('class="score-rules"', self.html)
+        for reason in (
+            "身份表达、纪念、赠礼或即时购买动机",
+            "多来源覆盖、讨论速度和互动信号",
+            "关键词可识别性和后续发酵空间",
+            "适配杯子、服装、手机壳等载体",
+            "选品、广告定向和商品文案",
+            "一日新闻、阶段性话题、周期事件还是常青兴趣",
+            "未接入真实平台竞品数据",
+            "每项必须给出该热点的具体评分理由",
+        ):
+            self.assertIn(reason, self.html)
         for judgement in (
             "身份表达、纪念、赠礼或即时购买动机",
             "多来源覆盖、讨论速度和互动信号",

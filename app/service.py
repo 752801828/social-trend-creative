@@ -441,6 +441,19 @@ class TrendService:
             db.execute(
                 "INSERT OR IGNORE INTO source_sync_state(id,status) VALUES(1,'idle')"
             )
+            for row in db.execute(
+                "SELECT id,raw_discovery FROM runs WHERE raw_discovery!='' AND candidate_count=0"
+            ).fetchall():
+                try:
+                    count = len(self._normalise_candidates(
+                        extract_json_object(row["raw_discovery"]), None
+                    ))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    count = 0
+                if count:
+                    db.execute(
+                        "UPDATE runs SET candidate_count=? WHERE id=?", (count, row["id"])
+                    )
 
     async def start(self) -> None:
         if not self.scheduler_task or self.scheduler_task.done():
@@ -819,13 +832,13 @@ class TrendService:
     def launch_sellability_scoring(self, run_id: str) -> bool:
         with self._connect() as db:
             exists = db.execute(
-                """SELECT 1 FROM trends t WHERE t.run_id=?
-                   AND NOT EXISTS (SELECT 1 FROM sellability_pool s WHERE s.trend_id=t.id)
-                   LIMIT 1""",
+                """SELECT 1 FROM runs r WHERE r.id=? AND r.raw_discovery!=''
+                   AND r.candidate_count>
+                       (SELECT COUNT(*) FROM raw_sellability_pool s WHERE s.run_id=r.id)""",
                 (run_id,),
             ).fetchone()
         if not exists:
-            raise ValueError("该任务没有待评分的热点方向")
+            raise ValueError("该任务的热点已经全部完成可卖分计算")
         return self._launch(
             run_id, self._run_stage(run_id, "sellability"), f"sellability-{run_id}"
         )
