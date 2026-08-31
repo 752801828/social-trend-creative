@@ -62,3 +62,4 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 - **评分进度（Sellability progress）**：`/api/state.sellability` 中的持久数据计数加进程内任务状态；显示全部、已评分、待评分方向和当前历史任务。服务重启后任务状态回到 idle，但数据库计数仍准确。
 - **原始热点评分（Raw sellability score）**：可卖分首先关联 `run_id + candidate_id`，不依赖图案池；`raw_sellability_pool` 是销售候选的事实来源，后续图案方向通过 `source_candidate_id` 继承配额。
 - **筛选排序**：热点、销售候选、图案及产品卡片 API 支持关键词、分类、等级和可卖分排序；图案池额外支持透明/未检出筛选，并保持分页懒加载。
+页面使用 `total_hotspots`、`scored_hotspots`、`pending_hotspots` 统计原始热点而非后续图案方向；旧 `*_directions` 字段仅为兼容保留。

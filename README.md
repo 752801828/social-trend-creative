@@ -390,3 +390,4 @@ python -m unittest discover -s tests -v
 python -m compileall -q app
 docker compose config --quiet
 ```
+进度栏按“热点”统计，而不是“可用图案方向”：显示已评分热点 / 全部热点 / 待评分热点。原始热点还未进入图案池时，也能正常计算和展示销售候选。

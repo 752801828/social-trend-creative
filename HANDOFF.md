@@ -234,3 +234,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - 当前测试以仓库最新 `python -m unittest discover -s tests -v` 结果为准。
 
 新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。
+页面进度优先使用 `/api/state.sellability.total_hotspots`、`scored_hotspots`、`pending_hotspots`，显示“热点”口径；旧 `*_directions` 字段仍保留兼容。

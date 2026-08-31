@@ -910,6 +910,9 @@ class TrendService:
             "total_directions": total,
             "scored_directions": scored,
             "pending_directions": max(0, total - scored),
+            "total_hotspots": total,
+            "scored_hotspots": scored,
+            "pending_hotspots": max(0, total - scored),
         }
 
     def launch_generation(self, run_id: str, count: int | None = None) -> bool:
