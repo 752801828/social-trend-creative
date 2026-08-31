@@ -116,6 +116,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - 可卖分主对象已改为原始热点：`raw_sellability_pool` 用 `(run_id,candidate_id)` 保存评分，即使任务还没有 `trends` 也能补算和展示；图案方向再按 `source_candidate_id` 继承评分与配额。进度中的总数是历史原始热点数，不是可用图案方向数。
 - 评分规则面板逐项写明判断内容、商业原因和通用强弱分档；每张评分卡的 `metrics[].judgement` 是模型针对该热点生成的实际评分理由。
 - 生图配额为 A=3×2、B=1×2、C=1×2、D=1×1（图案数 × 每图案产品图数）。热点、销售候选、图案图库和产品图库支持分页筛选与排序；新增 `/sellability`。
+- 当前产品生成白名单固定为 `vehicle spare-tire cover`（备胎罩）和 `phone case`（手机壳）；主体标签保持开放枚举，但产品提示词和产品图选择不得输出其它载体。
 - 服务机若无法访问 Docker Hub，需先在运行容器执行 `docker exec social-trend-creative pip install --no-cache-dir "Pillow>=10,<12"`，再采用 `docker cp`、`docker commit` 和 `docker compose up -d --force-recreate --no-build` 更新。
 
 ## 管理 API

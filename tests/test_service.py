@@ -119,6 +119,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("uniform pure white (#FFFFFF)", pool_prompt)
         self.assertIn("printed directly on the product", pool_prompt)
         self.assertIn("vehicle spare-tire cover", pool_prompt)
+        self.assertIn("must be either a vehicle spare-tire cover or a phone case", pool_prompt)
+        self.assertNotIn("mug, tumbler, phone case, T-shirt", pool_prompt)
         self.assertIn("roughly 140–240 English words", pool_prompt)
         self.assertIn("attached generated pattern image as the exact artwork reference", pool_prompt)
         self.assertIn("icon set, emblem, badge", pool_prompt)
@@ -145,6 +147,8 @@ class TrendServiceTests(unittest.TestCase):
         flow_prompt = self.service._flow_prompt(self._candidate("candidate-1", "Trend", "", None))
         self.assertIn("printed directly on the single physical product", flow_prompt)
         self.assertIn("vehicle spare-tire cover", flow_prompt)
+        self.assertIn("choose exactly one of: vehicle spare-tire cover or phone case", flow_prompt)
+        self.assertNotIn("mug, tumbler", flow_prompt)
         self.assertIn("not digitally pasted", flow_prompt)
         self.assertIn("Keep the source event recognizable", flow_prompt)
         sellability_prompt = self.service._sellability_prompt([trend])
@@ -460,7 +464,7 @@ class TrendServiceTests(unittest.TestCase):
         result = self.service.list_pool_cards("sellability", grade="A", sort="score_desc")
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["entries"][0]["item"]["total_score"], 100)
-        self.assertEqual(result["entries"][0]["item"]["recommended_products"], ["mug", "phone case"])
+        self.assertEqual(result["entries"][0]["item"]["recommended_products"], ["phone case"])
 
     def test_sellability_backfill_scores_old_runs_and_preserves_terminal_status(self):
         run_id = self.service.create_run("manual")
@@ -886,6 +890,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("generation_interval_minutes", self.html)
         self.assertIn("热点、图案与提示词生成间隔（分钟）", self.html)
         self.assertIn("每轮随机图案/产品数（1–30）", self.html)
+        self.assertIn("备胎罩或手机壳", self.html)
 
     def test_generated_images_open_in_an_accessible_viewer(self):
         self.assertIn('id="imageDialog"', self.html)

@@ -178,3 +178,4 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 修复历史评分显示 `0/0` 且点击无动作：评分对象从依赖 `trends` 的图案方向改为全部原始热点，新增 `raw_sellability_pool` 按任务与候选 ID 持久化结果；补算任务直接读取 `runs.raw_discovery`，没有图案池也可评分，进度按 `candidate_count` 与原始评分记录统计。后续图案方向按 `source_candidate_id` 复制评分与配额。
 - 扩充页面规则为“权重 + 判断内容 + 商业理由 + 通用强弱分档”，并明确卡片详情的每项 `judgement` 是针对当前热点的实际评分理由，解决只见权重、不知为何得分的问题。
 - 评分进度字段同时提供热点口径：`/api/state.sellability` 返回 `total_hotspots`、`scored_hotspots`、`pending_hotspots`，页面优先显示“已评分热点 / 全部热点 / 待评分热点”；旧 `*_directions` 字段保留兼容。
+- 当前产品图范围收紧为两个载体：`vehicle spare-tire cover`（备胎罩）与 `phone case`（手机壳）；主体标签保持开放枚举，后续扩展商品时再增加白名单。

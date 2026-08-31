@@ -63,3 +63,5 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 - **原始热点评分（Raw sellability score）**：可卖分首先关联 `run_id + candidate_id`，不依赖图案池；`raw_sellability_pool` 是销售候选的事实来源，后续图案方向通过 `source_candidate_id` 继承配额。
 - **筛选排序**：热点、销售候选、图案及产品卡片 API 支持关键词、分类、等级和可卖分排序；图案池额外支持透明/未检出筛选，并保持分页懒加载。
 页面使用 `total_hotspots`、`scored_hotspots`、`pending_hotspots` 统计原始热点而非后续图案方向；旧 `*_directions` 字段仅为兼容保留。
+
+当前产品载体白名单：`vehicle spare-tire cover`（备胎罩）、`phone case`（手机壳）。主体标签可以任意扩展，但产品图生成只允许这两个载体。

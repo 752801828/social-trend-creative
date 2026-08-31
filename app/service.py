@@ -87,6 +87,7 @@ SELLABILITY_METRICS = (
     ("lifespan", "销售窗口寿命", 10),
     ("competition_opportunity", "竞争机会", 5),
 )
+PRODUCT_TYPES = ("vehicle spare-tire cover", "phone case")
 
 
 @lru_cache(maxsize=2)
@@ -1270,13 +1271,23 @@ Schema:
             grade, pattern_quota, products_per_pattern = "C", 1, 2
         else:
             grade, pattern_quota, products_per_pattern = "D", 1, 1
-        products = string_list(source.get("recommended_products"), limit=8, item_limit=100)
+        products = []
+        for product in string_list(source.get("recommended_products"), limit=8, item_limit=100):
+            value = product.casefold()
+            if "spare" in value or "备胎" in product:
+                choice = PRODUCT_TYPES[0]
+            elif "phone" in value or "mobile" in value or "手机" in product:
+                choice = PRODUCT_TYPES[1]
+            else:
+                continue
+            if choice not in products:
+                products.append(choice)
         return {
             "total_score": total,
             "grade": grade,
             "metrics": metrics,
             "target_audience": str(source.get("target_audience") or "需要进一步验证的美国泛兴趣人群")[:1000],
-            "recommended_products": products or ["T-shirt"],
+            "recommended_products": products or list(PRODUCT_TYPES),
             "valid_window": str(source.get("valid_window") or "短期测试，依据点击与收藏数据复核")[:500],
             "sales_reason": str(source.get("sales_reason") or "信息不足，建议以小样测试验证")[:1500],
             "risk_level": str(source.get("risk_level") or "medium").lower()[:20],
@@ -2079,7 +2090,7 @@ For every input trend_id, write a pattern_prompt and a product_prompt. The patte
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
 Rules:
-1. One prompt must show one main product only: mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, poster, or another clearly named printable item.
+1. One prompt must show one main product only, and it must be either a vehicle spare-tire cover or a phone case. Do not choose mugs, tumblers, apparel, bags, posters, stickers, or any other product in this project version.
 2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
 3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Replace protected identities with generic unbranded equivalents, but keep the event's core action and context recognizable.
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
@@ -2260,7 +2271,7 @@ Visual direction: {trend['visual_brief_en']}
 
 Requirements:
 - Use the attached generated pattern image as the exact artwork reference. Preserve its subjects, action, composition, palette, and style instead of redesigning it.
-- Render the design printed directly on the single physical product named in the visual direction. If no product is named, choose the best fit from a mug, tumbler, phone case, T-shirt, hoodie, tote bag, cushion, blanket, vehicle spare-tire cover, sticker, or poster.
+- Render the design printed directly on the single physical product named in the visual direction. If no product is named, choose exactly one of: vehicle spare-tire cover or phone case.
 - Show one main product only, fully visible and easy to inspect. Do not create a collage or show several product types.
 - Make the artwork conform naturally to the product's printable area, curvature, seams, folds, and material. It must look genuinely printed, not digitally pasted on top.
 - Use a clean commercial product-photography composition with a simple neutral setting. Keep the product and printed design sharp and unobstructed.
