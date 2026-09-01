@@ -576,12 +576,14 @@ class TrendService:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
+        timeout_seconds = max(30, int(os.getenv("MCP_TIMEOUT_SECONDS", "300")))
         try:
-            async with streamable_http_client(self.trendradar_mcp_url) as streams:
-                read_stream, write_stream = streams[:2]
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    response = await session.call_tool(name, arguments=arguments)
+            async with asyncio.timeout(timeout_seconds):
+                async with streamable_http_client(self.trendradar_mcp_url) as streams:
+                    read_stream, write_stream = streams[:2]
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        response = await session.call_tool(name, arguments=arguments)
         except Exception as exc:
             raise RuntimeError(
                 f"TrendRadar MCP {name} 调用失败: {safe_error(exc)}"
@@ -1152,10 +1154,33 @@ Schema:
                 )
         return self._normalise_candidates({"trends": raw_trends}, None)
 
+    async def _sync_sources_for_acquisition(self) -> None:
+        """Reuse a just-finished sync; never issue two expensive RSS pulls back-to-back."""
+        if self.source_sync_task and not self.source_sync_task.done():
+            timeout_seconds = max(30, int(os.getenv("MCP_TIMEOUT_SECONDS", "300")))
+            await asyncio.wait_for(asyncio.shield(self.source_sync_task), timeout_seconds + 10)
+            with self._connect() as db:
+                state = db.execute(
+                    "SELECT status,error FROM source_sync_state WHERE id=1"
+                ).fetchone()
+            if state and state["status"] == "failed":
+                raise RuntimeError(f"TrendRadar来源同步失败: {state['error'] or '未知错误'}")
+            return
+        with self._connect() as db:
+            state = db.execute(
+                "SELECT status,last_success_at FROM source_sync_state WHERE id=1"
+            ).fetchone()
+        recent_success = parse_source_time(state["last_success_at"]) if state and state["last_success_at"] else None
+        if recent_success and recent_success.tzinfo and (
+            datetime.now(timezone.utc) - recent_success
+        ).total_seconds() < 600:
+            return
+        await self.sync_source_entries()
+
     async def _acquire_raw_trends(self, run_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
         self._update_run(run_id, status="running", stage="acquisition", error="")
         if self.trendradar_mcp_url:
-            await self.sync_source_entries()
+            await self._sync_sources_for_acquisition()
             entries = self.list_source_entries(
                 5000, lookback_hours=int(config["lookback_hours"])
             )

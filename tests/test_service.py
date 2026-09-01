@@ -615,6 +615,24 @@ class TrendServiceTests(unittest.TestCase):
         entries = self.service.list_source_entries()
         self.assertEqual(first, {"fetched": 1, "inserted": 1})
         self.assertEqual(second, {"fetched": 1, "inserted": 0})
+
+    def test_acquisition_reuses_recent_source_sync(self):
+        self.service._update_source_sync_state(
+            status="succeeded", last_success_at=utc_now(), error=""
+        )
+        self.service.sync_source_entries = mock.AsyncMock()
+        asyncio.run(self.service._sync_sources_for_acquisition())
+        self.service.sync_source_entries.assert_not_awaited()
+
+    def test_mcp_timeout_configuration_is_documented(self):
+        self.assertIn(
+            "MCP_TIMEOUT_SECONDS=300",
+            (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "asyncio.timeout(timeout_seconds)",
+            (PROJECT_ROOT / "app" / "service.py").read_text(encoding="utf-8"),
+        )
         self.assertEqual(len(entries), 1)
         self.assertEqual(self.service.count_source_entries(), 1)
         self.assertEqual(self.service.list_source_entries(offset=1), [])
