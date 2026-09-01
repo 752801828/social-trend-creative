@@ -65,3 +65,4 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 页面使用 `total_hotspots`、`scored_hotspots`、`pending_hotspots` 统计原始热点而非后续图案方向；旧 `*_directions` 字段仅为兼容保留。
 
 当前产品载体白名单：`vehicle spare-tire cover`（备胎罩）、`phone case`（手机壳）。主体标签可以任意扩展，但产品图生成只允许这两个载体。
+MCP 错误诊断：`ExceptionGroup/TaskGroup` 必须展开子异常，错误记录应包含具体工具名与连接/协议原因，不能只保留外层摘要。

@@ -236,3 +236,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 
 新对话应以仓库实际工作树和 `main` 分支为准，不依赖原对话上下文。
 页面进度优先使用 `/api/state.sellability.total_hotspots`、`scored_hotspots`、`pending_hotspots`，显示“热点”口径；旧 `*_directions` 字段仍保留兼容。
+TrendRadar 同步后台任务会捕获并记录异常；`safe_error()` 会展开 `ExceptionGroup` 子错误。排查采集失败时先看 `source_state.sync.error` 和 `docker logs`，其中应包含 MCP 工具名及具体网络/协议原因。

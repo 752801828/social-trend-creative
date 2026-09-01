@@ -179,3 +179,4 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 扩充页面规则为“权重 + 判断内容 + 商业理由 + 通用强弱分档”，并明确卡片详情的每项 `judgement` 是针对当前热点的实际评分理由，解决只见权重、不知为何得分的问题。
 - 评分进度字段同时提供热点口径：`/api/state.sellability` 返回 `total_hotspots`、`scored_hotspots`、`pending_hotspots`，页面优先显示“已评分热点 / 全部热点 / 待评分热点”；旧 `*_directions` 字段保留兼容。
 - 当前产品图范围收紧为两个载体：`vehicle spare-tire cover`（备胎罩）与 `phone case`（手机壳）；主体标签保持开放枚举，后续扩展商品时再增加白名单。
+- 改进 TrendRadar MCP 异常诊断：展开 Python `ExceptionGroup/TaskGroup` 的子异常，并在 `get_latest_rss` 等工具调用失败时补充工具名和具体连接/协议错误；来源同步后台任务统一回收异常，避免只留下不可定位的 `unhandled errors in a TaskGroup`。

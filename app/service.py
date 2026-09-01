@@ -125,7 +125,12 @@ def string_list(value: Any, *, limit: int, item_limit: int) -> list[str]:
 
 
 def safe_error(exc: Exception) -> str:
-    return re.sub(r"(?i)(authorization|api[_-]?key|bearer)\s*[:=]?\s*\S+", r"\1=***", str(exc))[:1000]
+    if isinstance(exc, BaseExceptionGroup):
+        details = "; ".join(safe_error(child) for child in exc.exceptions)
+        message = f"{type(exc).__name__}: {details}"
+    else:
+        message = f"{type(exc).__name__}: {exc}"
+    return re.sub(r"(?i)(authorization|api[_-]?key|bearer)\s*[:=]?\s*\S+", r"\1=***", message)[:1000]
 
 
 def canonical_url(value: str) -> str:
@@ -571,11 +576,16 @@ class TrendService:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        async with streamable_http_client(self.trendradar_mcp_url) as streams:
-            read_stream, write_stream = streams[:2]
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                response = await session.call_tool(name, arguments=arguments)
+        try:
+            async with streamable_http_client(self.trendradar_mcp_url) as streams:
+                read_stream, write_stream = streams[:2]
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    response = await session.call_tool(name, arguments=arguments)
+        except Exception as exc:
+            raise RuntimeError(
+                f"TrendRadar MCP {name} 调用失败: {safe_error(exc)}"
+            ) from exc
         if response.isError:
             raise RuntimeError(f"TrendRadar MCP工具调用失败: {name}")
         text = "\n".join(
@@ -596,9 +606,17 @@ class TrendService:
         if self.source_sync_task and not self.source_sync_task.done():
             return False
         self.source_sync_task = asyncio.create_task(
-            self.sync_source_entries(), name="trendradar-source-sync"
+            self._source_sync_worker(), name="trendradar-source-sync"
         )
         return True
+
+    async def _source_sync_worker(self) -> None:
+        try:
+            await self.sync_source_entries()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("TrendRadar source sync failed")
 
     def _update_source_sync_state(self, **values: Any) -> None:
         if not values:

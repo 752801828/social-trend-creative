@@ -40,6 +40,12 @@ class TrendServiceTests(unittest.TestCase):
             {"summary": "first\nsecond"},
         )
 
+    def test_safe_error_expands_exception_group(self):
+        from app.service import safe_error
+
+        error = ExceptionGroup("TaskGroup failed", [TimeoutError("MCP read timed out")])
+        self.assertIn("TimeoutError: MCP read timed out", safe_error(error))
+
     def test_gemini_retries_malformed_json(self):
         async def exercise():
             responses = iter(("{invalid}", '{"trends": []}'))
