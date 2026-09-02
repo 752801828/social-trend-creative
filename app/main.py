@@ -205,7 +205,7 @@ async def discover():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=False)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "sellability", "prompt_pool"]}
+    return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "prompt_pool"]}
 
 
 @app.post("/api/runs/full", status_code=202)

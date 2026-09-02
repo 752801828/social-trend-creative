@@ -603,6 +603,20 @@ class TrendServiceTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(exercise()), [run_id])
 
+    def test_full_pipeline_does_not_wait_for_sellability_scoring(self):
+        run_id = self.service.create_run("manual")
+        self.service._acquire_raw_trends = mock.AsyncMock()
+        self.service._classify_trend_pool = mock.AsyncMock()
+        self.service._create_prompt_pool = mock.AsyncMock()
+        self.service._score_sellability_pool = mock.AsyncMock(side_effect=AssertionError("scoring must be independent"))
+
+        asyncio.run(self.service._run_stage(run_id, "full", auto_generate=False))
+
+        self.service._acquire_raw_trends.assert_awaited_once()
+        self.service._classify_trend_pool.assert_awaited_once()
+        self.service._create_prompt_pool.assert_awaited_once()
+        self.service._score_sellability_pool.assert_not_awaited()
+
     def test_trendradar_source_sync_is_idempotent(self):
         self.service.trendradar_mcp_url = "http://trendradar-mcp:3333/mcp"
 
@@ -765,6 +779,7 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("⑤ 生成产品图", self.html)
         self.assertIn("建立可用图案、销售候选和提示词池", self.html)
         self.assertIn('"sellability"', main)
+        self.assertIn('"stages": ["acquisition", "classification", "prompt_pool"]', main)
         self.assertIn('launch_full_pipeline(trigger_type="manual", auto_generate=False)', main)
         self.assertIn("热点来源平台", self.html)
         self.assertIn("优先地区（全球搜索", self.html)

@@ -980,11 +980,9 @@ class TrendService:
         with self._connect() as db:
             exists = db.execute(
                 """SELECT 1 FROM pattern_assets a
-                   LEFT JOIN sellability_pool s ON s.trend_id=a.trend_id
                    WHERE a.run_id=? AND a.status='success'
-                     AND (SELECT COUNT(*) FROM generations g
-                          WHERE g.pattern_asset_id=a.id AND g.status='success')
-                         < COALESCE(s.products_per_pattern,1)
+                     AND NOT EXISTS (SELECT 1 FROM generations g
+                                     WHERE g.pattern_asset_id=a.id AND g.status='success')
                    LIMIT 1""",
                 (run_id,),
             ).fetchone()
@@ -1023,7 +1021,7 @@ class TrendService:
                     await self._acquire_raw_trends(run_id, config)
                 if stage in {"classification", "full"}:
                     await self._classify_trend_pool(run_id, config)
-                if stage in {"sellability", "full"}:
+                if stage == "sellability":
                     await self._score_sellability_pool(run_id, config)
                 if stage in {"prompt_pool", "full"}:
                     await self._create_prompt_pool(run_id, config, count)
@@ -1591,24 +1589,14 @@ Schema:
     ) -> list[str]:
         with self._connect() as db:
             prompts = [dict(row) for row in db.execute(
-                """SELECT t.*, p.id AS prompt_id, p.pattern_prompt,
-                          COALESCE(s.total_score,0) AS sell_score,
-                          COALESCE(s.pattern_quota,1) AS pattern_quota,
-                          (SELECT COUNT(*) FROM pattern_assets a
-                           WHERE a.trend_id=t.id AND a.status='success') AS existing_patterns
+                """SELECT t.*, p.id AS prompt_id, p.pattern_prompt
                    FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
-                   LEFT JOIN sellability_pool s ON s.trend_id=t.id
                    WHERE p.run_id=? AND p.status='ready'""",
                 (run_id,),
             ).fetchall()]
-        candidates = []
-        for prompt in prompts:
-            candidates.extend([prompt] * max(0, prompt["pattern_quota"] - prompt["existing_patterns"]))
-        if not candidates:
+        if not prompts:
             raise ValueError("提示词池为空，请先生成提示词池")
-        random.shuffle(candidates)
-        candidates.sort(key=lambda item: item["sell_score"], reverse=True)
-        selected = candidates[:min(len(candidates), max(1, count or config["images_per_trend"]))]
+        selected = random.sample(prompts, min(len(prompts), max(1, count or config["images_per_trend"])))
         self._update_run(run_id, status="running", stage="pattern_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
@@ -1652,33 +1640,19 @@ Schema:
                 params.extend(pattern_ids)
             patterns = [dict(row) for row in db.execute(
                 f"""SELECT a.*,t.topic_en,t.topic_zh,t.summary_zh,t.why_trending,t.visual_brief_en,
-                           t.status AS trend_status,p.prompt AS product_prompt,
-                           COALESCE(s.total_score,0) AS sell_score,
-                           COALESCE(s.products_per_pattern,1) AS products_per_pattern,
-                           COALESCE(s.recommended_products,'[]') AS recommended_products,
-                           (SELECT COUNT(*) FROM generations g
-                            WHERE g.pattern_asset_id=a.id AND g.status='success') AS existing_products
+                           t.status AS trend_status,p.prompt AS product_prompt
                     FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
                     JOIN prompt_pool p ON p.id=a.prompt_id
-                    LEFT JOIN sellability_pool s ON s.trend_id=a.trend_id
                     WHERE a.run_id=? AND a.status='success'{pattern_filter}
+                      AND NOT EXISTS (SELECT 1 FROM generations g
+                                      WHERE g.pattern_asset_id=a.id AND g.status='success')
                     """,
                 params,
             ).fetchall()]
-        candidates = []
-        for pattern in patterns:
-            try:
-                pattern["product_choices"] = json.loads(pattern["recommended_products"])
-            except (TypeError, json.JSONDecodeError):
-                pattern["product_choices"] = []
-            for slot in range(pattern["existing_products"], pattern["products_per_pattern"]):
-                candidates.append({**pattern, "product_slot": slot})
-        if not candidates:
+        if not patterns:
             raise ValueError("没有待生成产品图的图案，请先生成图案")
-        random.shuffle(candidates)
-        candidates.sort(key=lambda item: item["sell_score"], reverse=True)
-        limit = len(candidates) if pattern_ids and count is None else max(1, count or config["images_per_trend"])
-        selected = candidates[:min(len(candidates), limit)]
+        limit = len(patterns) if pattern_ids and count is None else max(1, count or config["images_per_trend"])
+        selected = random.sample(patterns, min(len(patterns), limit))
         self._update_run(run_id, status="running", stage="product_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
@@ -1694,8 +1668,6 @@ Schema:
                     prompt_id=item["prompt_id"],
                     prompt_text=self._product_reference_prompt(
                         item["product_prompt"] or self._flow_prompt(item),
-                        item["product_choices"][item["product_slot"] % len(item["product_choices"])]
-                        if item["product_choices"] else None,
                     ),
                     pattern_asset_id=item["id"],
                     reference_image=reference,

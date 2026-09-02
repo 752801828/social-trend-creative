@@ -56,15 +56,17 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 # 2026-08-26 业务补充
 
 - **销售候选（Sellability candidate）**：经过 AI 可卖分估算的原始热点。`raw_sellability_pool` 保存热点级判断；分类后通过 `source_candidate_id` 将配额复制到方向级 `sellability_pool`，仅作美国市场商品测试的决策支持。
-- **可卖等级与配额**：A 80–100 分生成 3 个图案、每图案 2 个产品图；B 65–79 分生成 1×2；C 60–64 分生成 1×2；D 0–59 分生成 1×1。低分不删除热点。
+- **可卖等级**：A 80–100、B 65–79、C 60–64、D 0–59；当前只用于分析、展示和筛选，不改变随机生图数量或后续流程。低分不删除热点。
 - **真实透明 PNG**：Flow 输出先做边缘清理；假透明、棋盘格或边缘仍不透明时由 `rembg/u2netp` 提取前景，再经 Pillow alpha 检测后统一保存 `.png`；`has_transparency=1` 才表示可直接下载。
 - **历史评分补算（Sellability backfill）**：为引入销售候选池之前创建的任务补齐评分；新任务自动评分，旧任务必须通过补算入口生成 `sellability_pool` 记录。
 - **评分进度（Sellability progress）**：`/api/state.sellability` 中的持久数据计数加进程内任务状态；显示全部、已评分、待评分方向和当前历史任务。服务重启后任务状态回到 idle，但数据库计数仍准确。
-- **原始热点评分（Raw sellability score）**：可卖分首先关联 `run_id + candidate_id`，不依赖图案池；`raw_sellability_pool` 是销售候选的事实来源，后续图案方向通过 `source_candidate_id` 继承配额。
+- **原始热点评分（Raw sellability score）**：可卖分首先关联 `run_id + candidate_id`，不依赖图案池；`raw_sellability_pool` 是销售候选的事实来源，后续图案方向可通过 `source_candidate_id` 关联分数，但不继承生成配额。
 - **筛选排序**：热点、销售候选、图案及产品卡片 API 支持关键词、分类、等级和可卖分排序；图案池额外支持透明/未检出筛选，并保持分页懒加载。
 页面使用 `total_hotspots`、`scored_hotspots`、`pending_hotspots` 统计原始热点而非后续图案方向；旧 `*_directions` 字段仅为兼容保留。
 
 当前产品载体白名单：`vehicle spare-tire cover`（备胎罩）、`phone case`（手机壳）。主体标签可以任意扩展，但产品图生成只允许这两个载体。
+
+评分支路与生图解耦：评分未完成、失败或不存在都不影响分类、提示词、图案和产品图；生图从提示词池/成功图案池随机抽取。
 MCP 错误诊断：`ExceptionGroup/TaskGroup` 必须展开子异常，错误记录应包含具体工具名与连接/协议原因，不能只保留外层摘要。
 Gemini 响应诊断：严格 JSON 失败时先允许 JSON5 兼容解析，再用 `json-repair` 尝试恢复缺逗号/截断结构；高输出阶段单批最多 5 条；HTTP 500/超时错误保留类型并退避重试，不能把上游故障误报为单纯 JSON 格式错误。
 采集阶段默认最多等待 `MCP_TIMEOUT_SECONDS=300` 秒；最近 10 分钟内已成功的来源同步可被创作任务复用。

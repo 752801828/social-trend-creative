@@ -179,7 +179,9 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 扩充页面规则为“权重 + 判断内容 + 商业理由 + 通用强弱分档”，并明确卡片详情的每项 `judgement` 是针对当前热点的实际评分理由，解决只见权重、不知为何得分的问题。
 - 评分进度字段同时提供热点口径：`/api/state.sellability` 返回 `total_hotspots`、`scored_hotspots`、`pending_hotspots`，页面优先显示“已评分热点 / 全部热点 / 待评分热点”；旧 `*_directions` 字段保留兼容。
 - 当前产品图范围收紧为两个载体：`vehicle spare-tire cover`（备胎罩）与 `phone case`（手机壳）；主体标签保持开放枚举，后续扩展商品时再增加白名单。
+- 评分与生成流程解耦：`discover` 和 `full` 不再执行或等待可卖分，评分通过独立 API/补算入口运行；图案和产品图恢复从对应池随机抽取，评分只用于分析、筛选和排序，不影响后续流程。
 - 改进 TrendRadar MCP 异常诊断：展开 Python `ExceptionGroup/TaskGroup` 的子异常，并在 `get_latest_rss` 等工具调用失败时补充工具名和具体连接/协议错误；来源同步后台任务统一回收异常，避免只留下不可定位的 `unhandled errors in a TaskGroup`。
 - 改进 Gemini 长响应容错：严格 JSON 解析失败时使用 `json5` 兼容尾逗号、单引号和裸键名，再用 `json-repair` 尝试恢复缺逗号/截断结构；500 类 HTTP 错误使用递增退避重试，并在任务错误中保留 `JSONDecodeError`/`HTTPStatusError` 类型，避免整批任务只显示模糊失败。
 - 高输出阶段增加安全分批上限 `GEMINI_SAFE_BATCH_SIZE=5`，分类、原始评分、方向评分和双提示词均按最多 5 条请求；`candidate_count` 仍保留配置语义但不再让单次 JSON 输出无限变大。
 - 修复采集任务长时间卡在 `acquisition`：MCP 工具调用增加默认 300 秒超时；创作任务复用最近 10 分钟成功的同步结果，避免手动同步后重复拉取；旧卡住任务取消后重新创建即可。
+- 将分类/提示词流水线与可卖分请求解耦：`full` 和 `discover` 不再把评分当作前置阶段，评分失败不会阻断分类、提示词或生图；图案、产品图恢复从各自合格池真正随机抽取，分数只保留为页面分析和筛选字段。
