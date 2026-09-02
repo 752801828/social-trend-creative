@@ -684,6 +684,24 @@ class TrendServiceTests(unittest.TestCase):
             "asyncio.timeout(timeout_seconds)",
             (PROJECT_ROOT / "app" / "service.py").read_text(encoding="utf-8"),
         )
+
+    def test_cleanup_empty_runs_removes_only_zero_hotspot_tasks(self):
+        empty = self.service.create_run("scheduled")
+        populated = self.service.create_run("manual")
+        self.service._update_run(populated, raw_discovery=json.dumps({"trends": [{"topic_en": "kept"}]}), candidate_count=1)
+
+        result = asyncio.run(self.service.cleanup_empty_runs())
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertIn(empty, result["run_ids"])
+        self.assertIsNone(self.service.get_run(empty))
+        self.assertIsNotNone(self.service.get_run(populated))
+
+    def test_cleanup_empty_endpoint_and_button_are_exposed(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("/api/runs/cleanup-empty", main)
+        self.assertIn("清理 0 热点任务", self.html)
+        self.assertIn("cleanupEmptyRuns", self.html)
     def test_source_entries_cluster_repeated_overseas_reports(self):
         entries = [
             {"title": "Powerful earthquake strikes eastern Indonesia", "source_id": "bbc", "published_at": "2", "fetched_at": "2"},

@@ -318,3 +318,8 @@ async def delete_run(run_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="轮次不存在")
     return {"deleted": True}
+
+
+@app.post("/api/runs/cleanup-empty")
+async def cleanup_empty_runs():
+    return await service.cleanup_empty_runs()

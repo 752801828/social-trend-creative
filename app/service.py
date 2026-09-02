@@ -2720,6 +2720,41 @@ Requirements:
             shutil.rmtree(target)
         return bool(deleted)
 
+    async def cleanup_empty_runs(self) -> dict[str, Any]:
+        """Delete runs that never produced a single parseable hotspot."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id,raw_discovery FROM runs WHERE candidate_count=0"
+            ).fetchall()
+        run_ids = []
+        for row in rows:
+            raw = str(row["raw_discovery"] or "").strip()
+            if not raw:
+                run_ids.append(row["id"])
+                continue
+            try:
+                payload = extract_json_object(raw)
+                if not isinstance(payload.get("trends"), list) or not payload["trends"]:
+                    run_ids.append(row["id"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                run_ids.append(row["id"])
+        if self.active_run_id in run_ids and self.active_task and not self.active_task.done():
+            self.active_task.cancel()
+            await asyncio.gather(self.active_task, return_exceptions=True)
+            self.active_task = None
+            self.active_run_id = None
+        async with self.operation_lock:
+            with self._connect() as db:
+                deleted = db.execute(
+                    f"DELETE FROM runs WHERE id IN ({','.join('?' for _ in run_ids)})",
+                    run_ids,
+                ).rowcount if run_ids else 0
+            for run_id in run_ids:
+                target = (self.assets_dir / run_id).resolve()
+                if target.parent == self.assets_dir.resolve() and target.exists():
+                    shutil.rmtree(target)
+        return {"deleted": int(deleted), "run_ids": run_ids}
+
     def dashboard(self) -> dict[str, Any]:
         today = datetime.now(timezone.utc).date().isoformat()
         with self._connect() as db:
