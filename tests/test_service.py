@@ -40,6 +40,12 @@ class TrendServiceTests(unittest.TestCase):
             {"summary": "first\nsecond"},
         )
 
+    def test_extracts_json5_from_gemini_response(self):
+        self.assertEqual(
+            extract_json_object("```json\n{trends: [{topic_en: 'A',}],}\n```")['trends'][0]['topic_en'],
+            "A",
+        )
+
     def test_safe_error_expands_exception_group(self):
         from app.service import safe_error
 
@@ -63,6 +69,13 @@ class TrendServiceTests(unittest.TestCase):
 
         with mock.patch("app.service.asyncio.sleep", new=mock.AsyncMock()):
             self.assertEqual(asyncio.run(exercise()), '{"trends": []}')
+
+    def test_gemini_safe_batch_size_caps_long_json_stages(self):
+        from app.service import GEMINI_SAFE_BATCH_SIZE
+
+        self.assertEqual(GEMINI_SAFE_BATCH_SIZE, 5)
+        self.assertIn("json5>=0.9,<1", (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8"))
+        self.assertIn("json-repair>=0.30,<1", (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8"))
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
@@ -615,24 +628,6 @@ class TrendServiceTests(unittest.TestCase):
         entries = self.service.list_source_entries()
         self.assertEqual(first, {"fetched": 1, "inserted": 1})
         self.assertEqual(second, {"fetched": 1, "inserted": 0})
-
-    def test_acquisition_reuses_recent_source_sync(self):
-        self.service._update_source_sync_state(
-            status="succeeded", last_success_at=utc_now(), error=""
-        )
-        self.service.sync_source_entries = mock.AsyncMock()
-        asyncio.run(self.service._sync_sources_for_acquisition())
-        self.service.sync_source_entries.assert_not_awaited()
-
-    def test_mcp_timeout_configuration_is_documented(self):
-        self.assertIn(
-            "MCP_TIMEOUT_SECONDS=300",
-            (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
-        )
-        self.assertIn(
-            "asyncio.timeout(timeout_seconds)",
-            (PROJECT_ROOT / "app" / "service.py").read_text(encoding="utf-8"),
-        )
         self.assertEqual(len(entries), 1)
         self.assertEqual(self.service.count_source_entries(), 1)
         self.assertEqual(self.service.list_source_entries(offset=1), [])
@@ -658,6 +653,23 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(translated["title_zh"], "印度尼西亚发生强烈地震")
         self.assertEqual(translated["summary_zh"], "外媒报道印度尼西亚发生强烈地震。")
 
+    def test_acquisition_reuses_recent_source_sync(self):
+        self.service._update_source_sync_state(
+            status="succeeded", last_success_at=utc_now(), error=""
+        )
+        self.service.sync_source_entries = mock.AsyncMock()
+        asyncio.run(self.service._sync_sources_for_acquisition())
+        self.service.sync_source_entries.assert_not_awaited()
+
+    def test_mcp_timeout_configuration_is_documented(self):
+        self.assertIn(
+            "MCP_TIMEOUT_SECONDS=300",
+            (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "asyncio.timeout(timeout_seconds)",
+            (PROJECT_ROOT / "app" / "service.py").read_text(encoding="utf-8"),
+        )
     def test_source_entries_cluster_repeated_overseas_reports(self):
         entries = [
             {"title": "Powerful earthquake strikes eastern Indonesia", "source_id": "bbc", "published_at": "2", "fetched_at": "2"},

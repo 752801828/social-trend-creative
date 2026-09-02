@@ -180,4 +180,6 @@ Social Trend Creative 是独立调度和创作服务。它拥有自己的管理�
 - 评分进度字段同时提供热点口径：`/api/state.sellability` 返回 `total_hotspots`、`scored_hotspots`、`pending_hotspots`，页面优先显示“已评分热点 / 全部热点 / 待评分热点”；旧 `*_directions` 字段保留兼容。
 - 当前产品图范围收紧为两个载体：`vehicle spare-tire cover`（备胎罩）与 `phone case`（手机壳）；主体标签保持开放枚举，后续扩展商品时再增加白名单。
 - 改进 TrendRadar MCP 异常诊断：展开 Python `ExceptionGroup/TaskGroup` 的子异常，并在 `get_latest_rss` 等工具调用失败时补充工具名和具体连接/协议错误；来源同步后台任务统一回收异常，避免只留下不可定位的 `unhandled errors in a TaskGroup`。
+- 改进 Gemini 长响应容错：严格 JSON 解析失败时使用 `json5` 兼容尾逗号、单引号和裸键名，再用 `json-repair` 尝试恢复缺逗号/截断结构；500 类 HTTP 错误使用递增退避重试，并在任务错误中保留 `JSONDecodeError`/`HTTPStatusError` 类型，避免整批任务只显示模糊失败。
+- 高输出阶段增加安全分批上限 `GEMINI_SAFE_BATCH_SIZE=5`，分类、原始评分、方向评分和双提示词均按最多 5 条请求；`candidate_count` 仍保留配置语义但不再让单次 JSON 输出无限变大。
 - 修复采集任务长时间卡在 `acquisition`：MCP 工具调用增加默认 300 秒超时；创作任务复用最近 10 分钟成功的同步结果，避免手动同步后重复拉取；旧卡住任务取消后重新创建即可。

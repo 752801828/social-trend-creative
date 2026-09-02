@@ -66,4 +66,5 @@ A region Gemini should cover first; worldwide acquisition may still return stron
 
 当前产品载体白名单：`vehicle spare-tire cover`（备胎罩）、`phone case`（手机壳）。主体标签可以任意扩展，但产品图生成只允许这两个载体。
 MCP 错误诊断：`ExceptionGroup/TaskGroup` 必须展开子异常，错误记录应包含具体工具名与连接/协议原因，不能只保留外层摘要。
+Gemini 响应诊断：严格 JSON 失败时先允许 JSON5 兼容解析，再用 `json-repair` 尝试恢复缺逗号/截断结构；高输出阶段单批最多 5 条；HTTP 500/超时错误保留类型并退避重试，不能把上游故障误报为单纯 JSON 格式错误。
 采集阶段默认最多等待 `MCP_TIMEOUT_SECONDS=300` 秒；最近 10 分钟内已成功的来源同步可被创作任务复用。

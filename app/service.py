@@ -88,6 +88,7 @@ SELLABILITY_METRICS = (
     ("competition_opportunity", "竞争机会", 5),
 )
 PRODUCT_TYPES = ("vehicle spare-tire cover", "phone case")
+GEMINI_SAFE_BATCH_SIZE = 5
 
 
 @lru_cache(maxsize=2)
@@ -171,7 +172,24 @@ def extract_json_object(text: str) -> dict[str, Any]:
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("Gemini响应中没有JSON对象")
-    parsed = json.loads(cleaned[start : end + 1], strict=False)
+    fragment = cleaned[start : end + 1]
+    try:
+        parsed = json.loads(fragment, strict=False)
+    except json.JSONDecodeError as strict_error:
+        try:
+            # Gemini occasionally emits valid JSON5 (trailing commas, bare keys,
+            # single quotes) despite a JSON-only instruction. Accept it only as
+            # a parser fallback; all persisted output is normalised back to JSON.
+            import json5
+
+            parsed = json5.loads(fragment)
+        except Exception:
+            try:
+                from json_repair import repair_json
+
+                parsed = json.loads(repair_json(fragment), strict=False)
+            except Exception:
+                raise strict_error
     if not isinstance(parsed, dict):
         raise ValueError("Gemini响应JSON必须是对象")
     return parsed
@@ -1085,7 +1103,7 @@ Schema:
     ) -> list[dict[str, Any]]:
         clusters = self._cluster_source_entries(entries)
         annotated: dict[str, dict[str, Any]] = {}
-        batch_size = int(config["candidate_count"])
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(clusters), batch_size):
             compact = []
             for index, cluster in enumerate(clusters[offset:offset + batch_size], offset + 1):
@@ -1215,7 +1233,7 @@ Schema:
         self._update_run(run_id, status="running", stage="classification", error="")
         raw_responses = []
         trends = []
-        batch_size = int(config["candidate_count"])
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(candidates), batch_size):
             batch = candidates[offset:offset + batch_size]
             verification_text = await self._call_gemini(
@@ -1369,7 +1387,7 @@ Schema:
         if not missing:
             return []
         supplied: dict[str, dict[str, Any]] = {}
-        batch_size = int(config["candidate_count"])
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(missing), batch_size):
             batch = [{**item, "id": item["candidate_id"]} for item in missing[offset:offset + batch_size]]
             try:
@@ -1460,7 +1478,7 @@ Schema:
                 return raw_ids + copied_ids
             raise ValueError("该任务的热点已经全部完成可卖分计算")
         supplied: dict[str, dict[str, Any]] = {}
-        batch_size = int(config["candidate_count"])
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(trends), batch_size):
             batch = trends[offset:offset + batch_size]
             try:
@@ -1519,7 +1537,7 @@ Schema:
             raise ValueError("没有待生成提示词的可用图案")
         self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
         supplied_map: dict[str, dict[str, str]] = {}
-        batch_size = int(config["candidate_count"])
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(trends), batch_size):
             response_text = await self._call_gemini(
                 self._prompt_pool_prompt(trends[offset:offset + batch_size]),
@@ -1973,7 +1991,7 @@ Schema:
             except Exception as exc:
                 error = exc
                 if attempt < attempts:
-                    await asyncio.sleep(2 * attempt)
+                    await asyncio.sleep(5 * attempt if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500 else 2 * attempt)
         raise RuntimeError(f"Gemini请求失败（{attempts}次）: {safe_error(error or RuntimeError('unknown'))}")
 
     async def _call_flow(
