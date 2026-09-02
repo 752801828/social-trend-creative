@@ -44,6 +44,12 @@ One Flow image-to-image request that sends a successful pattern asset as a Base6
 **Product rendering**:
 A realistic image of one physical item with a specific stored pattern asset printed directly on its usable surface, respecting curvature, seams, folds, material, placement, and scale.
 
+**Creative tag set**:
+A structured description of one design direction using reusable dimensions such as subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, and risk controls. Values inside a dimension are open-ended; the set describes the concrete event-linked design rather than a closed catalog.
+
+**Tag variant**:
+A new design direction that keeps a source event and selected tag dimensions while replacing one or more dimensions, such as changing palette or style without losing the subject and defining action.
+
 **Prompt-first discovery**:
 Asking Gemini Web to research public sources and return raw trends. It is not proof of live browsing; real evidence is retained when available but is not a pipeline gate.
 

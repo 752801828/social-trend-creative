@@ -16,7 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="trend-creative-test-"))
 
 from app.service import (  # noqa: E402
-    FLOW_MODELS, SELLABILITY_METRICS, TrendService, extract_json_object, utc_now,
+    CREATIVE_TAG_KEYS, FLOW_MODELS, SELLABILITY_METRICS, TrendService,
+    extract_json_object, normalise_creative_tags, utc_now,
 )
 
 
@@ -78,6 +79,16 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("json5>=0.9,<1", (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8"))
         self.assertIn("json-repair>=0.30,<1", (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8"))
 
+    def test_creative_tags_are_open_ended_but_structured(self):
+        tags = normalise_creative_tags({"subject": ["cat", "panda"], "action": "jumping", "unknown": ["ignored"]})
+        self.assertEqual(tags["subject"], ["cat", "panda"])
+        self.assertEqual(tags["action"], ["jumping"])
+        self.assertEqual(set(tags), set(CREATIVE_TAG_KEYS))
+        self.assertNotIn("unknown", tags)
+        with self.service._connect() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
+        self.assertIn("creative_tags", columns)
+
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
         self.assertFalse(any("2k" in model.lower() or "4k" in model.lower() for model in FLOW_MODELS))
@@ -133,7 +144,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn('"topic_zh": "Trend"', pool_prompt)
         self.assertIn("every supplied pattern-pool entry", pool_prompt)
         self.assertIn("exactly one prompt pair for every supplied trend_id", pool_prompt)
-        self.assertIn("pattern_prompt and a product_prompt", pool_prompt)
+        self.assertIn("pattern_prompt", pool_prompt)
+        self.assertIn("product_prompt", pool_prompt)
         self.assertIn("transparent-background PNG", pool_prompt)
         self.assertIn("no full-canvas background", pool_prompt)
         self.assertIn("uniform pure white (#FFFFFF)", pool_prompt)
@@ -240,6 +252,7 @@ class TrendServiceTests(unittest.TestCase):
                 "prompts": [
                     {
                         "trend_id": item["id"],
+                        "creative_tags": {"subject": ["cat"], "action": ["running"]},
                         "pattern_prompt": f"Pattern for {item['topic_en']}",
                         "product_prompt": f"Product for {item['topic_en']}",
                     }
@@ -260,6 +273,7 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
         self.assertTrue(all(item["pattern_prompt"].startswith("Pattern for") for item in run["prompt_pool"]))
+        self.assertTrue(all(item["creative_tags"]["subject"] == ["cat"] for item in run["prompt_pool"]))
         self.assertEqual(runs[0]["prompt_count"], 2)
         self.assertEqual(self.service.list_pool_cards("acquire", 1, 0)["total"], 2)
         self.assertEqual(len(self.service.list_pool_cards("acquire", 1, 0)["entries"]), 1)
@@ -913,6 +927,9 @@ class StaticPageTests(unittest.TestCase):
         self.assertNotIn("Promise.all(runs.map", self.html)
         self.assertIn("if(signature===moduleSignature)return;moduleSignature=signature;token=++moduleLoadToken", self.html)
         self.assertIn("const meta=moduleMeta[currentPage];let token=moduleLoadToken", self.html)
+        self.assertIn("creative_tags", self.html)
+        self.assertIn("tagsHtml", self.html)
+        self.assertIn("tagLabels", self.html)
 
     def test_sellability_filters_and_transparent_png_download_are_exposed(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")

@@ -14,7 +14,7 @@
 | ② 热点聚类 | 查询窗口内全部来源条目 | 标题聚类同一事件，Gemini 分批翻译、分类并标记风险；`candidate_count` 仅表示 AI 批大小 | 全类型原始热点 |
 | ③ 图案提取 | 同一任务的全部原始热点 | Gemini 保留事件中的主体、关键动作和场景，优先转译为可识别的原创漫画或编辑插画；抽象纹样、符号和几何元素只做辅助，或在具体画面不安全时替代 | 可用图案池 `trends` |
 | ④ 可卖分评估 | 全部原始热点（独立支路） | Gemini 按购买意图、社媒商业热度、搜索增长、商品适配、受众清晰度、窗口寿命、竞争机会七项指标估算 0–100 分，并给出逐项判断理由、等级和风险；评分失败不阻断后续流程，也不控制生图 | 热点销售候选池 `raw_sellability_pool`，并可选映射到后续 `sellability_pool` |
-| ⑤ 提示词生成 | 同一任务全部尚未处理的可用图案 | Gemini 为每个方向同时建立独立图案提示词和参考图产品提示词 | 提示词池 `prompt_pool` |
+| ⑤ 提示词生成 | 同一任务全部尚未处理的可用图案 | Gemini 为每个方向建立结构化创意标签、独立图案提示词和参考图产品提示词 | 提示词池 `prompt_pool` |
 | ⑥ 图案生成 | 按等级配额从提示词池抽取的图案提示词 | Flow 返回后先清理纯色边缘；检测到假透明、棋盘格或不透明边缘时由 `rembg/u2netp` 提取前景，最后用 Pillow 校验 alpha 并保存 `.png` | 图案资产 `pattern_assets` |
 | ⑦ 产品图生成 | 尚未达到等级配额的图案资产 | Flow 通过图生图读取实际透明 PNG，把同一图案印到推荐的单一产品上 | 产品图片与记录 `generations` |
 
@@ -378,7 +378,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - `source_entries`：TrendRadar 来源条目快照，以规范化 URL/来源身份幂等去重。
 - `source_sync_state`：最近同步状态、时间、抓取量和新增量。
 - `trends`：AI 提取后的可用图案池；表名为兼容旧数据库保留。
-- `prompt_pool`：成对保存 `pattern_prompt`、产品提示词、来源热点、状态和使用次数。
+- `prompt_pool`：保存结构化 `creative_tags`、`pattern_prompt`、产品提示词、来源热点、状态和使用次数；标签维度开放取值，便于后续做标签替换变体。
 - `pattern_assets`：独立图案的 Flow 请求、图片、模型、耗时和错误。
 - `generations`：产品图请求、对应 `prompt_id` 与 `pattern_asset_id`、模型、图片、耗时和错误。
 - 图片：`data/assets/<run>/<trend>/`。

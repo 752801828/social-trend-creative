@@ -34,7 +34,7 @@ git log -5 --oneline
 1. 来源同步：通过 TrendRadar Streamable HTTP MCP 幂等保存原生 RSS/可选热榜条目到 `source_entries`。
 2. 热点获取：将查询窗口内全部来源条目按事件聚类，Gemini 分批翻译、分类并标记风险，形成全类型原始热点。
 3. 图案提取：把全部原始热点分批转译为安全、原创、可复用、与产品无关的视觉方向，优先保留主体、关键动作和场景并形成可识别的漫画或编辑插画；抽象元素只辅助具体叙事，或在具体画面不安全时替代，写入 `trends`。
-4. 提示词生成：为全部尚未处理的视觉方向逐条生成 `pattern_prompt` 和参考图产品提示词，写入 `prompt_pool`。
+4. 提示词生成：为全部尚未处理的视觉方向逐条生成结构化 `creative_tags`、`pattern_prompt` 和参考图产品提示词，写入 `prompt_pool`。
 5. 图案生成：随机抽取提示词交给 Flow，生成无产品的独立漫画、图标、徽章、符号、抽象纹样或其他图案，写入 `pattern_assets`。
 6. 产品图生成：通过 Flow 图生图传入实际图案资产，把同一图案印在产品上，记录 `prompt_id` 和 `pattern_asset_id`。
 
@@ -169,8 +169,8 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - SQLite：`data/trend-creative.db`
 - 图片：`data/assets/<run>/<trend>/`
 - Docker 挂载：`./data:/app/data`
-- `trends` 是视觉方向池（旧表名保留）；`prompt_pool` 成对保存图案/产品提示词；`pattern_assets` 保存独立图案；`generations` 保存产品图并通过 `pattern_asset_id` 追踪参考图。
-- 启动时自动创建 `pattern_assets`，为旧 `prompt_pool` 补 `pattern_prompt`，并为旧 `generations` 补 `pattern_asset_id`，不需要手工迁移。
+- `trends` 是视觉方向池（旧表名保留）；`prompt_pool` 保存结构化 `creative_tags`、图案/产品提示词；`pattern_assets` 和 `generations` 会随关联提示词返回这些标签。
+- 启动时自动创建 `pattern_assets`，为旧 `prompt_pool` 补 `pattern_prompt` 和 `creative_tags`，并为旧 `generations` 补 `pattern_asset_id`，不需要手工迁移。
 - 删除轮次会级联删除可用图案池、提示词池、生成记录及本地图片；必须保留运行中保护和路径范围检查。
 
 ## 环境变量

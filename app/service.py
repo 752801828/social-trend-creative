@@ -90,6 +90,10 @@ SELLABILITY_METRICS = (
 PRODUCT_TYPES = ("vehicle spare-tire cover", "phone case")
 GEMINI_SAFE_BATCH_SIZE = 5
 EMPTY_RUN_STALE_MINUTES = 10
+CREATIVE_TAG_KEYS = (
+    "subject", "action", "setting", "style", "palette", "composition",
+    "mood", "texture", "typography", "product", "audience", "risk_controls",
+)
 
 
 @lru_cache(maxsize=2)
@@ -111,6 +115,25 @@ def utc_now() -> str:
 
 def json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalise_creative_tags(value: Any) -> dict[str, list[str]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {}
+    if not isinstance(value, dict):
+        value = {}
+    tags = {}
+    for key in CREATIVE_TAG_KEYS:
+        raw_values = value.get(key, [])
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, list):
+            raw_values = []
+        tags[key] = [str(item).strip()[:120] for item in raw_values if str(item).strip()][:12]
+    return tags
 
 
 def confidence(value: Any) -> float:
@@ -349,6 +372,7 @@ class TrendService:
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
                     trend_id TEXT NOT NULL REFERENCES trends(id) ON DELETE CASCADE,
                     pattern_prompt TEXT NOT NULL DEFAULT '',
+                    creative_tags TEXT NOT NULL DEFAULT '{}',
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'ready',
                     used_count INTEGER NOT NULL DEFAULT 0,
@@ -443,6 +467,8 @@ class TrendService:
             prompt_columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
             if "pattern_prompt" not in prompt_columns:
                 db.execute("ALTER TABLE prompt_pool ADD COLUMN pattern_prompt TEXT NOT NULL DEFAULT ''")
+            if "creative_tags" not in prompt_columns:
+                db.execute("ALTER TABLE prompt_pool ADD COLUMN creative_tags TEXT NOT NULL DEFAULT '{}'")
             trend_columns = {row["name"] for row in db.execute("PRAGMA table_info(trends)")}
             if "source_candidate_id" not in trend_columns:
                 db.execute("ALTER TABLE trends ADD COLUMN source_candidate_id TEXT NOT NULL DEFAULT ''")
@@ -1538,7 +1564,7 @@ Schema:
         if not trends:
             raise ValueError("没有待生成提示词的可用图案")
         self._update_run(run_id, status="running", stage="prompt_pool_generation", error="")
-        supplied_map: dict[str, dict[str, str]] = {}
+        supplied_map: dict[str, dict[str, Any]] = {}
         batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(trends), batch_size):
             response_text = await self._call_gemini(
@@ -1552,6 +1578,7 @@ Schema:
                 str(item.get("trend_id")): {
                     "pattern_prompt": str(item.get("pattern_prompt") or "").strip(),
                     "product_prompt": str(item.get("product_prompt") or item.get("prompt") or "").strip(),
+                    "creative_tags": normalise_creative_tags(item.get("creative_tags")),
                 }
                 for item in supplied if isinstance(item, dict)
             })
@@ -1562,11 +1589,13 @@ Schema:
                 supplied = supplied_map.get(trend["id"], {})
                 pattern_prompt = supplied.get("pattern_prompt") or self._pattern_flow_prompt(trend)
                 prompt = supplied.get("product_prompt") or self._flow_prompt(trend)
+                creative_tags = normalise_creative_tags(supplied.get("creative_tags"))
                 db.execute(
                     """INSERT INTO prompt_pool
-                       (id,run_id,trend_id,pattern_prompt,prompt,status,created_at)
-                       VALUES(?,?,?,?,?,'ready',?)""",
-                    (prompt_id, run_id, trend["id"], pattern_prompt[:10000], prompt[:10000], utc_now()),
+                       (id,run_id,trend_id,pattern_prompt,creative_tags,prompt,status,created_at)
+                       VALUES(?,?,?,?,?,?,'ready',?)""",
+                    (prompt_id, run_id, trend["id"], pattern_prompt[:10000],
+                     json_text(creative_tags), prompt[:10000], utc_now()),
                 )
                 prompt_ids.append(prompt_id)
         self._update_run(run_id, status="prompt_pool_ready", stage="prompt_pool")
@@ -2122,7 +2151,7 @@ Schema:
         ]
         return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write a pattern_prompt and a product_prompt. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels: no full-canvas background, scenery extending to the image edges, sky, ground, wall, room, floor, horizon, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, cast shadow, or merchandising scene. Keep transparent negative space around and between design elements. If transparency is technically impossible, use only uniform pure white (#FFFFFF) outside the artwork, never a textured, colored, gradient, or illustrated background. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
+For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Use these keys and return arrays of concise English values: subject (any living being or object, such as cat, dog, athlete, panda, satellite), action, setting, style, palette, composition, mood, texture, typography, product (only vehicle spare-tire cover or phone case), audience, risk_controls. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels: no full-canvas background, scenery extending to the image edges, sky, ground, wall, room, floor, horizon, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, cast shadow, or merchandising scene. Keep transparent negative space around and between design elements. If transparency is technically impossible, use only uniform pure white (#FFFFFF) outside the artwork, never a textured, colored, gradient, or illustrated background. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
 
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
@@ -2131,13 +2160,13 @@ Rules:
 2. The artwork must conform naturally to curvature, seams, folds, and material and look genuinely printed.
 3. Do not use logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Replace protected identities with generic unbranded equivalents, but keep the event's core action and context recognizable.
 4. Avoid text unless essential; if used, it must be short, generic, and correctly spelled.
-5. Return exactly one prompt pair for every supplied trend_id, preserve every trend_id exactly, and return strict JSON only.
+5. Return exactly one prompt pair for every supplied trend_id and exactly one creative_tags object for each pair, preserve every trend_id exactly, and return strict JSON only.
 
 Pattern-pool entries:
 {json.dumps(compact, ensure_ascii=False)}
 
 Schema:
-{{"prompts":[{{"trend_id":"id","pattern_prompt":"standalone artwork prompt","product_prompt":"reference-image product rendering prompt"}}]}}"""
+{{"prompts":[{{"trend_id":"id","creative_tags":{{"subject":["generic athletes"],"action":["shoving"],"setting":["training field"],"style":["original editorial comic"],"palette":["navy","silver"],"composition":["dynamic diagonal"],"mood":["tense"],"texture":["bold ink"],"typography":[],"product":["phone case"],"audience":["football fans"],"risk_controls":["unbranded fictional figures"]}},"pattern_prompt":"standalone artwork prompt","product_prompt":"reference-image product rendering prompt"}}]}}"""
 
     @staticmethod
     def _normalise_candidates(
@@ -2413,6 +2442,7 @@ Requirements:
                 for row in rows:
                     item = dict(row)
                     run_started_at = item.pop("run_started_at")
+                    item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
                     entries.append({
                         "item": item,
                         "run": {"id": item["run_id"], "started_at": run_started_at},
@@ -2423,8 +2453,9 @@ Requirements:
                     "SELECT COUNT(*) FROM pattern_assets WHERE image_path IS NOT NULL"
                 ).fetchone()[0])
                 rows = db.execute(
-                    """SELECT a.*,t.topic_zh,r.started_at AS run_started_at
+                    """SELECT a.*,p.creative_tags,t.topic_zh,r.started_at AS run_started_at
                        FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
+                       LEFT JOIN prompt_pool p ON p.id=a.prompt_id
                        JOIN runs r ON r.id=a.run_id WHERE a.image_path IS NOT NULL
                        ORDER BY a.created_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset),
@@ -2434,6 +2465,7 @@ Requirements:
                     item = dict(row)
                     topic_zh = item.pop("topic_zh")
                     run_started_at = item.pop("run_started_at")
+                    item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
                     item["image_url"] = f"/assets/{item['image_path']}"
                     entries.append({
                         "item": item,
@@ -2447,9 +2479,11 @@ Requirements:
                 ).fetchone()[0])
                 rows = db.execute(
                     """SELECT g.id,g.run_id,g.trend_id,g.prompt_id,g.pattern_asset_id,g.sequence,g.model,g.prompt,
+                              p.creative_tags,
                               g.status,g.image_path,g.mime_type,g.duration_ms,g.error,g.created_at,
                               g.finished_at,t.topic_zh,r.started_at AS run_started_at
                        FROM generations g JOIN trends t ON t.id=g.trend_id
+                       LEFT JOIN prompt_pool p ON p.id=g.prompt_id
                        JOIN runs r ON r.id=g.run_id WHERE g.image_path IS NOT NULL
                        ORDER BY g.created_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset),
@@ -2459,6 +2493,7 @@ Requirements:
                     item = dict(row)
                     topic_zh = item.pop("topic_zh")
                     run_started_at = item.pop("run_started_at")
+                    item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
                     item["image_url"] = f"/assets/{item['image_path']}"
                     entries.append({
                         "item": item,
@@ -2646,10 +2681,14 @@ Requirements:
                 "SELECT * FROM trends WHERE run_id = ? ORDER BY rank", (run_id,)
             ).fetchall()]
             generations = [dict(row) for row in db.execute(
-                "SELECT * FROM generations WHERE run_id = ? ORDER BY created_at", (run_id,)
+                """SELECT g.*,p.creative_tags FROM generations g
+                   LEFT JOIN prompt_pool p ON p.id=g.prompt_id
+                   WHERE g.run_id = ? ORDER BY g.created_at""", (run_id,)
             ).fetchall()]
             pattern_assets = [dict(row) for row in db.execute(
-                "SELECT * FROM pattern_assets WHERE run_id=? ORDER BY created_at", (run_id,)
+                """SELECT a.*,p.creative_tags FROM pattern_assets a
+                   LEFT JOIN prompt_pool p ON p.id=a.prompt_id
+                   WHERE a.run_id=? ORDER BY a.created_at""", (run_id,)
             ).fetchall()]
             prompt_pool = [dict(row) for row in db.execute(
                 """SELECT p.*, t.topic_zh, t.category FROM prompt_pool p
@@ -2661,9 +2700,11 @@ Requirements:
                 (run_id,),
             ).fetchall()]
             raw_sellability_pool = [dict(row) for row in db.execute(
-                "SELECT * FROM raw_sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
-                (run_id,),
-            ).fetchall()]
+                  "SELECT * FROM raw_sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
+                  (run_id,),
+              ).fetchall()]
+        for item in generations + pattern_assets + prompt_pool:
+            item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
         score_map = {}
         for score in sellability_pool:
             for key in ("metrics", "recommended_products", "risk_reasons"):
