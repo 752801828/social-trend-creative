@@ -89,6 +89,7 @@ SELLABILITY_METRICS = (
 )
 PRODUCT_TYPES = ("vehicle spare-tire cover", "phone case")
 GEMINI_SAFE_BATCH_SIZE = 5
+EMPTY_RUN_STALE_MINUTES = 10
 
 
 @lru_cache(maxsize=2)
@@ -478,6 +479,9 @@ class TrendService:
                     db.execute(
                         "UPDATE runs SET candidate_count=? WHERE id=?", (count, row["id"])
                     )
+        self._cleanup_empty_runs_sync(
+            datetime.now(timezone.utc) - timedelta(minutes=EMPTY_RUN_STALE_MINUTES)
+        )
 
     async def start(self) -> None:
         if not self.scheduler_task or self.scheduler_task.done():
@@ -2323,6 +2327,9 @@ Requirements:
         self._update_run(run_id, duration_ms=round((time.perf_counter() - started) * 1000), finished_at=utc_now())
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        self._cleanup_empty_runs_sync(
+            datetime.now(timezone.utc) - timedelta(minutes=EMPTY_RUN_STALE_MINUTES)
+        )
         with self._connect() as db:
             rows = db.execute(
                 """SELECT r.id,r.trigger_type,r.status,r.stage,r.started_at,r.finished_at,
@@ -2720,14 +2727,21 @@ Requirements:
             shutil.rmtree(target)
         return bool(deleted)
 
-    async def cleanup_empty_runs(self) -> dict[str, Any]:
-        """Delete runs that never produced a single parseable hotspot."""
+    def _empty_run_ids(
+        self, stale_before: datetime | None = None, *, include_active: bool = False
+    ) -> list[str]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id,raw_discovery FROM runs WHERE candidate_count=0"
+                "SELECT id,raw_discovery,started_at FROM runs WHERE candidate_count=0"
             ).fetchall()
         run_ids = []
         for row in rows:
+            if not include_active and row["id"] == self.active_run_id:
+                continue
+            if stale_before:
+                started_at = parse_source_time(row["started_at"])
+                if started_at and started_at > stale_before:
+                    continue
             raw = str(row["raw_discovery"] or "").strip()
             if not raw:
                 run_ids.append(row["id"])
@@ -2738,21 +2752,35 @@ Requirements:
                     run_ids.append(row["id"])
             except (TypeError, ValueError, json.JSONDecodeError):
                 run_ids.append(row["id"])
+        return run_ids
+
+    def _delete_run_ids(self, run_ids: list[str]) -> int:
+        if not run_ids:
+            return 0
+        with self._connect() as db:
+            deleted = db.execute(
+                f"DELETE FROM runs WHERE id IN ({','.join('?' for _ in run_ids)})",
+                run_ids,
+            ).rowcount
+        for run_id in run_ids:
+            target = (self.assets_dir / run_id).resolve()
+            if target.parent == self.assets_dir.resolve() and target.exists():
+                shutil.rmtree(target)
+        return int(deleted)
+
+    def _cleanup_empty_runs_sync(self, stale_before: datetime) -> int:
+        return self._delete_run_ids(self._empty_run_ids(stale_before))
+
+    async def cleanup_empty_runs(self) -> dict[str, Any]:
+        """Delete runs that never produced a single parseable hotspot."""
+        run_ids = self._empty_run_ids(include_active=True)
         if self.active_run_id in run_ids and self.active_task and not self.active_task.done():
             self.active_task.cancel()
             await asyncio.gather(self.active_task, return_exceptions=True)
             self.active_task = None
             self.active_run_id = None
         async with self.operation_lock:
-            with self._connect() as db:
-                deleted = db.execute(
-                    f"DELETE FROM runs WHERE id IN ({','.join('?' for _ in run_ids)})",
-                    run_ids,
-                ).rowcount if run_ids else 0
-            for run_id in run_ids:
-                target = (self.assets_dir / run_id).resolve()
-                if target.parent == self.assets_dir.resolve() and target.exists():
-                    shutil.rmtree(target)
+            deleted = self._delete_run_ids(run_ids)
         return {"deleted": int(deleted), "run_ids": run_ids}
 
     def dashboard(self) -> dict[str, Any]:

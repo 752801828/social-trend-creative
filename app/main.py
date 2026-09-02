@@ -96,12 +96,13 @@ async def health():
 
 @app.get("/api/state")
 def state(limit: int = Query(default=40, ge=1, le=200)):
+    runs = service.list_runs(limit)
     return {
         "config": service.get_config(),
         "connections": service.connection_info(),
         "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
         "dashboard": service.dashboard(),
-        "runs": service.list_runs(limit),
+        "runs": runs,
         "sellability": service.sellability_state(),
         "source_state": service.source_state(),
         "update": read_update_status(),

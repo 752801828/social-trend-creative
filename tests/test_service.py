@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -699,9 +700,23 @@ class TrendServiceTests(unittest.TestCase):
 
     def test_cleanup_empty_endpoint_and_button_are_exposed(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
         self.assertIn("/api/runs/cleanup-empty", main)
-        self.assertIn("清理 0 热点任务", self.html)
-        self.assertIn("cleanupEmptyRuns", self.html)
+        self.assertIn("清理 0 热点任务", html)
+        self.assertIn("cleanupEmptyRuns", html)
+
+    def test_list_runs_hides_stale_empty_tasks(self):
+        stale = self.service.create_run("scheduled")
+        recent = self.service.create_run("manual")
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        self.service._update_run(stale, started_at=old_time, status="running", stage="acquisition")
+
+        runs = self.service.list_runs()
+
+        ids = {run["id"] for run in runs}
+        self.assertNotIn(stale, ids)
+        self.assertIn(recent, ids)
+        self.assertIsNone(self.service.get_run(stale))
     def test_source_entries_cluster_repeated_overseas_reports(self):
         entries = [
             {"title": "Powerful earthquake strikes eastern Indonesia", "source_id": "bbc", "published_at": "2", "fetched_at": "2"},

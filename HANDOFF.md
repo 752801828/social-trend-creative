@@ -240,4 +240,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 TrendRadar 同步后台任务会捕获并记录异常；`safe_error()` 会展开 `ExceptionGroup` 子错误。排查采集失败时先看 `source_state.sync.error` 和 `docker logs`，其中应包含 MCP 工具名及具体网络/协议原因。
 Gemini JSON 解析先走标准 JSON，随后用 `json5` 兼容尾逗号、单引号和裸键名，再用 `json-repair` 尝试恢复缺逗号/截断等结构；分类、评分、提示词等高输出阶段单批最多 5 条，500 类 HTTP 错误重试采用 5/10 秒退避。服务机需要同步安装 `json5>=0.9,<1` 和 `json-repair>=0.30,<1`。
 MCP 工具调用使用 `MCP_TIMEOUT_SECONDS=300` 超时边界；采集任务会复用最近 10 分钟成功的来源同步，避免重复请求。旧卡住的 acquisition 任务需取消后重新创建。
-新增 `POST /api/runs/cleanup-empty` 和总览页清理按钮，用于删除 `candidate_count=0` 且没有可解析原始热点的任务；删除前会取消当前卡住的空采集任务，已有内容的任务不受影响。
+新增 `POST /api/runs/cleanup-empty` 和总览页清理按钮，用于删除 `candidate_count=0` 且没有可解析原始热点的任务；删除前会取消当前卡住的空采集任务，已有内容的任务不受影响。服务启动和 `/api/state` 读取任务列表时还会自动删除超过 10 分钟的空任务残留，当前活动任务保留，避免页面继续显示旧的“进行中”轮次。
