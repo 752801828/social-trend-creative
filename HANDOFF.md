@@ -35,6 +35,7 @@ git log -5 --oneline
 2. 热点获取：将查询窗口内全部来源条目按事件聚类，Gemini 分批翻译、分类并标记风险，形成全类型原始热点。
 3. 图案提取：把全部原始热点分批转译为安全、原创、可复用、与产品无关的视觉方向，优先保留主体、关键动作和场景并形成可识别的漫画或编辑插画；抽象元素只辅助具体叙事，或在具体画面不安全时替代，写入 `trends`。
 4. 提示词生成：为全部尚未处理的视觉方向逐条生成结构化 `creative_tags`、`pattern_prompt` 和参考图产品提示词，写入 `prompt_pool`。
+5. 独立打标签：对已有提示词池按需补充缺失的 `creative_tags`，不改写提示词、不生成图片，也不覆盖已有标签。
 5. 图案生成：随机抽取提示词交给 Flow，生成无产品的独立漫画、图标、徽章、符号、抽象纹样或其他图案，写入 `pattern_assets`。
 6. 产品图生成：通过 Flow 图生图传入实际图案资产，把同一图案印在产品上，记录 `prompt_id` 和 `pattern_asset_id`。
 
@@ -134,6 +135,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `POST /api/runs/{run_id}/sellability`：④计算可卖分、等级、风险和生成配额
 - `POST /api/sellability/backfill`：为全部历史缺分任务补算可卖分
 - `POST /api/runs/{run_id}/prompts`：③为全部未处理图案补齐提示词；旧 `count` 参数保留兼容但不参与抽样
+- `POST /api/runs/{run_id}/tags`：只为该任务中尚无标签的提示词补齐结构化创意标签
 - `POST /api/runs/{run_id}/patterns`：④随机生成独立图案，JSON 为 `{}` 或 `{"count":3}`
 - `POST /api/runs/{run_id}/products`：⑤用未消费图案生成产品图
 - `POST /api/runs/{run_id}/generate`：兼容入口，连续执行④⑤

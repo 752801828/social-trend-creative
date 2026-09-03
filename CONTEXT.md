@@ -50,6 +50,10 @@ A structured description of one design direction using reusable dimensions such 
 **Tag variant**:
 A new design direction that keeps a source event and selected tag dimensions while replacing one or more dimensions, such as changing palette or style without losing the subject and defining action.
 
+**Tagging task**:
+An optional operation that adds a creative tag set to an existing prompt-pool entry without rewriting either stored prompt or regenerating artwork.
+_Avoid_: Prompt generation, image analysis
+
 **Prompt-first discovery**:
 Asking Gemini Web to research public sources and return raw trends. It is not proof of live browsing; real evidence is retained when available but is not a pipeline gate.
 

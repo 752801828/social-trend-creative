@@ -247,6 +247,17 @@ async def prompts(run_id: str, request: PoolRequest):
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
+@app.post("/api/runs/{run_id}/tags", status_code=202)
+async def tag_prompts(run_id: str):
+    try:
+        launched = service.launch_tagging(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"run_id": run_id, "status": "accepted"}
+
+
 @app.post("/api/runs/{run_id}/sellability", status_code=202)
 async def score_sellability(run_id: str):
     try:

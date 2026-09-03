@@ -898,6 +898,20 @@ class TrendService:
             raise ValueError("没有待生成提示词的可用图案")
         return self._launch(run_id, self._run_stage(run_id, "prompt_pool", count), f"prompts-{run_id}")
 
+    def launch_tagging(self, run_id: str) -> bool:
+        with self._connect() as db:
+            run = db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
+            rows = db.execute(
+                "SELECT creative_tags FROM prompt_pool WHERE run_id=?", (run_id,)
+            ).fetchall()
+        if not run:
+            raise ValueError("轮次不存在")
+        if not rows:
+            raise ValueError("提示词池为空，请先生成提示词")
+        if not any(not any(normalise_creative_tags(row["creative_tags"]).values()) for row in rows):
+            raise ValueError("该任务的提示词已经全部完成标签")
+        return self._launch(run_id, self._run_stage(run_id, "tagging"), f"tags-{run_id}")
+
     def launch_sellability_scoring(self, run_id: str) -> bool:
         with self._connect() as db:
             exists = db.execute(
@@ -1055,14 +1069,17 @@ class TrendService:
                     await self._score_sellability_pool(run_id, config)
                 if stage in {"prompt_pool", "full"}:
                     await self._create_prompt_pool(run_id, config, count)
+                if stage == "tagging":
+                    await self._tag_prompt_pool(run_id, config)
                 if stage == "pattern_generation":
                     await self._generate_pattern_assets(run_id, config, count)
                 if stage == "product_generation":
                     await self._generate_products_from_patterns(run_id, config, count)
                 if stage == "generation" or (stage == "full" and auto_generate):
                     await self._generate_from_prompt_pool(run_id, config, count)
-                self._finish_duration(run_id, started)
-                if stage not in {"generation", "product_generation"} and not (stage == "full" and auto_generate):
+                if stage != "tagging":
+                    self._finish_duration(run_id, started)
+                if stage not in {"generation", "product_generation", "tagging"} and not (stage == "full" and auto_generate):
                     await self._notify_run(run_id)
             except asyncio.CancelledError:
                 self._update_run(run_id, status="cancelled", stage="finished", error="任务已取消", finished_at=utc_now())
@@ -1621,6 +1638,64 @@ Schema:
                 return left[0] + right[0], left[1] + right[1]
             logger.warning("Gemini %s batch skipped after retries: %s", result_key, error)
             return [], []
+
+    @staticmethod
+    def _tagging_prompt(prompts: list[dict[str, Any]]) -> str:
+        compact = [{
+            "prompt_id": item["id"],
+            "topic_en": item["topic_en"],
+            "topic_zh": item["topic_zh"],
+            "visual_brief_en": item["visual_brief_en"],
+            "pattern_prompt": item["pattern_prompt"],
+            "product_prompt": item["prompt"],
+        } for item in prompts]
+        return f"""Add structured creative tags to every supplied existing prompt pair. Do not rewrite prompts and do not invent a different event. Values must describe the concrete event-linked design. Return concise English arrays for exactly these keys: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Subject values are open-ended living beings or objects. Product values may only be vehicle spare-tire cover or phone case. Preserve every prompt_id and return strict JSON only.
+
+Prompt pairs:
+{json.dumps(compact, ensure_ascii=False)}
+
+Schema:
+{{"tags":[{{"prompt_id":"id","creative_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"product":[],"audience":[],"risk_controls":[]}}}}]}}"""
+
+    async def _tag_prompt_pool(self, run_id: str, config: dict[str, Any]) -> list[str]:
+        with self._connect() as db:
+            run = db.execute("SELECT status,stage,error FROM runs WHERE id=?", (run_id,)).fetchone()
+            prompts = [dict(row) for row in db.execute(
+                """SELECT p.*,t.topic_en,t.topic_zh,t.visual_brief_en
+                   FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
+                   WHERE p.run_id=? ORDER BY p.created_at""",
+                (run_id,),
+            ).fetchall()]
+        missing = [item for item in prompts if not any(normalise_creative_tags(item["creative_tags"]).values())]
+        if not missing:
+            raise ValueError("该任务没有待补充标签的提示词")
+        self._update_run(run_id, status="running", stage="creative_tagging", error="")
+        supplied: dict[str, dict[str, list[str]]] = {}
+        batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
+        for offset in range(0, len(missing), batch_size):
+            _responses, tagged = await self._gemini_batch_items(
+                missing[offset:offset + batch_size],
+                self._tagging_prompt,
+                config["gemini_verification_model"],
+                "tags",
+            )
+            supplied.update({
+                str(item.get("prompt_id")): normalise_creative_tags(item.get("creative_tags"))
+                for item in tagged if isinstance(item, dict) and item.get("prompt_id")
+            })
+        tagged_ids = [item["id"] for item in missing if any(supplied.get(item["id"], {}).values())]
+        with self._connect() as db:
+            db.executemany(
+                "UPDATE prompt_pool SET creative_tags=? WHERE id=?",
+                [(json_text(supplied[prompt_id]), prompt_id) for prompt_id in tagged_ids],
+            )
+        self._update_run(
+            run_id,
+            status=run["status"],
+            stage=run["stage"],
+            error=run["error"] if tagged_ids else "本次没有成功生成标签",
+        )
+        return tagged_ids
 
     async def _generate_from_prompt_pool(
         self,

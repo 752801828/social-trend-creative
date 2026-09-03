@@ -15,6 +15,7 @@
 | ③ 图案提取 | 同一任务的全部原始热点 | Gemini 保留事件中的主体、关键动作和场景，优先转译为可识别的原创漫画或编辑插画；抽象纹样、符号和几何元素只做辅助，或在具体画面不安全时替代 | 可用图案池 `trends` |
 | ④ 可卖分评估 | 全部原始热点（独立支路） | Gemini 按购买意图、社媒商业热度、搜索增长、商品适配、受众清晰度、窗口寿命、竞争机会七项指标估算 0–100 分，并给出逐项判断理由、等级和风险；评分失败不阻断后续流程，也不控制生图 | 热点销售候选池 `raw_sellability_pool`，并可选映射到后续 `sellability_pool` |
 | ⑤ 提示词生成 | 同一任务全部尚未处理的可用图案 | Gemini 为每个方向建立结构化创意标签、独立图案提示词和参考图产品提示词 | 提示词池 `prompt_pool` |
+| 独立打标签 | 指定任务中标签为空的已有提示词 | Gemini 只返回结构化创意标签，不修改现有提示词或图片 | 更新 `prompt_pool.creative_tags` |
 | ⑥ 图案生成 | 按等级配额从提示词池抽取的图案提示词 | Flow 返回后先清理纯色边缘；检测到假透明、棋盘格或不透明边缘时由 `rembg/u2netp` 提取前景，最后用 Pillow 校验 alpha 并保存 `.png` | 图案资产 `pattern_assets` |
 | ⑦ 产品图生成 | 尚未达到等级配额的图案资产 | Flow 通过图生图读取实际透明 PNG，把同一图案印到推荐的单一产品上 | 产品图片与记录 `generations` |
 
@@ -362,6 +363,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - `POST /api/runs/discover`：新建轮次并依次执行①热点获取、②图案提取、③提示词生成。
 - `POST /api/runs/{id}/classify`：对现有轮次执行②可用图案提取；路径名为兼容旧客户端保留。
 - `POST /api/runs/{id}/prompts`：执行③补齐全部提示词；为兼容旧客户端仍接受 `count`，但不再随机截断。
+- `POST /api/runs/{id}/tags`：单独补齐该任务已有提示词的缺失标签，不重写提示词。
 - `POST /api/runs/{id}/patterns`：执行⑤随机生成独立图案；JSON 可传 `{"count":3}`。
 - `POST /api/runs/{id}/products`：执行⑥从未消费图案生成产品图；JSON 可传 `{"count":3}`。
 - `POST /api/runs/{id}/generate`：兼容入口，按⑤→⑥连续执行两步生图。

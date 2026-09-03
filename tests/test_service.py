@@ -114,6 +114,60 @@ class TrendServiceTests(unittest.TestCase):
             columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
         self.assertIn("creative_tags", columns)
 
+    def test_tagging_runs_separately_without_rewriting_prompts(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Cat trend", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "ready"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            db.execute(
+                """INSERT INTO prompt_pool
+                   (id,run_id,trend_id,pattern_prompt,prompt,status,created_at)
+                   VALUES(?,?,?,?,?,'ready',?)""",
+                ("prompt-1", run_id, "trend-1", "ORIGINAL PATTERN", "ORIGINAL PRODUCT", utc_now()),
+            )
+
+        async def exercise():
+            async def fake_gemini(_prompt, _model, *, attempts):
+                return json.dumps({"tags": [{
+                    "prompt_id": "prompt-1",
+                    "creative_tags": {"subject": ["cat"], "style": ["comic"]},
+                }]})
+
+            self.service._call_gemini = fake_gemini
+            return await self.service._tag_prompt_pool(run_id, self.service.get_config())
+
+        self.assertEqual(asyncio.run(exercise()), ["prompt-1"])
+        prompt = self.service.get_run(run_id)["prompt_pool"][0]
+        self.assertEqual(prompt["pattern_prompt"], "ORIGINAL PATTERN")
+        self.assertEqual(prompt["prompt"], "ORIGINAL PRODUCT")
+        self.assertEqual(prompt["creative_tags"]["subject"], ["cat"])
+
+    def test_tagging_stage_restores_existing_run_status(self):
+        run_id = self.service.create_run("manual")
+        self.service._update_run(
+            run_id, status="completed", stage="finished",
+            finished_at="2026-09-01T00:00:00+00:00", duration_ms=123,
+        )
+        self.service._tag_prompt_pool = mock.AsyncMock(return_value=["prompt-1"])
+
+        asyncio.run(self.service._run_stage(run_id, "tagging"))
+
+        run = self.service.get_run(run_id)
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["stage"], "finished")
+        self.assertEqual(run["finished_at"], "2026-09-01T00:00:00+00:00")
+        self.assertEqual(run["duration_ms"], 123)
+
+    def test_separate_tagging_endpoint_and_button_are_exposed(self):
+        main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('/api/runs/{run_id}/tags', main)
+        self.assertIn("launch_tagging", main)
+        self.assertIn("单独打标签", html)
+        self.assertIn("runStage('tags')", html)
+
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
         self.assertFalse(any("2k" in model.lower() or "4k" in model.lower() for model in FLOW_MODELS))
