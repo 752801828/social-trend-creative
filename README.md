@@ -364,6 +364,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-update-watcher.ps1
 - `POST /api/runs/{id}/classify`：对现有轮次执行②可用图案提取；路径名为兼容旧客户端保留。
 - `POST /api/runs/{id}/prompts`：执行③补齐全部提示词；为兼容旧客户端仍接受 `count`，但不再随机截断。
 - `POST /api/runs/{id}/tags`：单独补齐该任务已有提示词的缺失标签，不重写提示词。
+- `POST /api/tags/backfill`：一次性补齐所有历史任务的空标签；进度在 `/api/state.tagging` 返回。
 - `POST /api/runs/{id}/patterns`：执行⑤随机生成独立图案；JSON 可传 `{"count":3}`。
 - `POST /api/runs/{id}/products`：执行⑥从未消费图案生成产品图；JSON 可传 `{"count":3}`。
 - `POST /api/runs/{id}/generate`：兼容入口，按⑤→⑥连续执行两步生图。

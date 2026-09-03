@@ -104,6 +104,7 @@ def state(limit: int = Query(default=40, ge=1, le=200)):
         "dashboard": service.dashboard(),
         "runs": runs,
         "sellability": service.sellability_state(),
+        "tagging": service.tagging_state(),
         "source_state": service.source_state(),
         "update": read_update_status(),
     }
@@ -256,6 +257,17 @@ async def tag_prompts(run_id: str):
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
     return {"run_id": run_id, "status": "accepted"}
+
+
+@app.post("/api/tags/backfill", status_code=202)
+async def backfill_tags():
+    try:
+        launched = service.launch_tagging_backfill()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"status": "accepted"}
 
 
 @app.post("/api/runs/{run_id}/sellability", status_code=202)

@@ -244,6 +244,10 @@ class TrendService:
             "status": "idle", "total_runs": 0, "completed_runs": 0,
             "current_run_id": "", "error": "", "updated_at": utc_now(),
         }
+        self.tagging_backfill = {
+            "status": "idle", "total_runs": 0, "completed_runs": 0,
+            "current_run_id": "", "error": "", "updated_at": utc_now(),
+        }
         self.source_sync_task: asyncio.Task | None = None
         self.source_sync_lock = asyncio.Lock()
         self.scheduler_task: asyncio.Task | None = None
@@ -911,6 +915,60 @@ class TrendService:
         if not any(not any(normalise_creative_tags(row["creative_tags"]).values()) for row in rows):
             raise ValueError("该任务的提示词已经全部完成标签")
         return self._launch(run_id, self._run_stage(run_id, "tagging"), f"tags-{run_id}")
+
+    def launch_tagging_backfill(self) -> bool:
+        if self.active_task and not self.active_task.done():
+            return False
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT run_id,creative_tags FROM prompt_pool ORDER BY created_at"
+            ).fetchall()
+        run_ids = []
+        for row in rows:
+            if not any(normalise_creative_tags(row["creative_tags"]).values()) and row["run_id"] not in run_ids:
+                run_ids.append(row["run_id"])
+        if not run_ids:
+            raise ValueError("所有提示词已经完成标签，或提示词池为空")
+        self.tagging_backfill = {
+            "status": "pending", "total_runs": len(run_ids), "completed_runs": 0,
+            "current_run_id": run_ids[0], "error": "", "updated_at": utc_now(),
+        }
+        return self._launch(
+            run_ids[0], self._backfill_tagging(run_ids), "tagging-backfill"
+        )
+
+    async def _backfill_tagging(self, run_ids: list[str]) -> None:
+        errors = []
+        async with self.operation_lock:
+            self.tagging_backfill["status"] = "running"
+            self.tagging_backfill["updated_at"] = utc_now()
+            for index, run_id in enumerate(run_ids, 1):
+                self.tagging_backfill["current_run_id"] = run_id
+                self.tagging_backfill["updated_at"] = utc_now()
+                try:
+                    await self._tag_prompt_pool(run_id, self.get_config())
+                except Exception as exc:
+                    errors.append(f"{run_id}: {safe_error(exc)}")
+                    logger.warning("Tagging backfill failed for %s: %s", run_id, safe_error(exc))
+                self.tagging_backfill["completed_runs"] = index
+                self.tagging_backfill["updated_at"] = utc_now()
+            self.tagging_backfill["status"] = "failed" if errors else "succeeded"
+            self.tagging_backfill["error"] = "; ".join(errors)[:1000]
+            self.tagging_backfill["current_run_id"] = ""
+            self.tagging_backfill["updated_at"] = utc_now()
+        self.active_run_id = None
+
+    def tagging_state(self) -> dict[str, Any]:
+        with self._connect() as db:
+            values = [row["creative_tags"] for row in db.execute("SELECT creative_tags FROM prompt_pool")]
+        total = len(values)
+        tagged = sum(bool(any(normalise_creative_tags(value).values())) for value in values)
+        return {
+            **self.tagging_backfill,
+            "total_prompts": total,
+            "tagged_prompts": tagged,
+            "pending_prompts": max(0, total - tagged),
+        }
 
     def launch_sellability_scoring(self, run_id: str) -> bool:
         with self._connect() as db:

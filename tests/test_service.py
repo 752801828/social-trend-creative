@@ -160,6 +160,28 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(run["finished_at"], "2026-09-01T00:00:00+00:00")
         self.assertEqual(run["duration_ms"], 123)
 
+    def test_tagging_backfill_visits_all_runs_with_empty_tags(self):
+        run_ids = [self.service.create_run("manual"), self.service.create_run("scheduled")]
+        for index, run_id in enumerate(run_ids):
+            trend = self._candidate(f"candidate-{index}", f"Topic {index}", "", None)
+            trend.pop("candidate_id")
+            trend.update({"id": f"trend-{index}", "status": "ready", "verification_note": "ready"})
+            self.service._replace_trends(run_id, [trend])
+            with self.service._connect() as db:
+                db.execute(
+                    "INSERT INTO prompt_pool(id,run_id,trend_id,prompt,status,created_at) VALUES(?,?,?,?,?,?)",
+                    (f"prompt-{index}", run_id, f"trend-{index}", "PROMPT", "ready", utc_now()),
+                )
+
+        async def exercise():
+            self.service._tag_prompt_pool = mock.AsyncMock(return_value=[])
+            self.assertTrue(self.service.launch_tagging_backfill())
+            await self.service.active_task
+
+        asyncio.run(exercise())
+        self.assertEqual(self.service.tagging_backfill["status"], "succeeded")
+        self.assertEqual(self.service.tagging_backfill["completed_runs"], 2)
+
     def test_separate_tagging_endpoint_and_button_are_exposed(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -167,6 +189,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("launch_tagging", main)
         self.assertIn("单独打标签", html)
         self.assertIn("runStage('tags')", html)
+        self.assertIn("/api/tags/backfill", main)
+        self.assertIn("补齐全部标签", html)
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
