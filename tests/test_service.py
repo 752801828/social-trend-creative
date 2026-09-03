@@ -72,6 +72,31 @@ class TrendServiceTests(unittest.TestCase):
         with mock.patch("app.service.asyncio.sleep", new=mock.AsyncMock()):
             self.assertEqual(asyncio.run(exercise()), '{"trends": []}')
 
+    def test_malformed_gemini_batch_splits_and_skips_only_bad_item(self):
+        async def exercise():
+            calls = []
+
+            async def fake_gemini(prompt, _model, *, attempts):
+                ids = json.loads(prompt)
+                calls.append(ids)
+                if len(ids) > 1 or ids == ["bad"]:
+                    raise RuntimeError("Gemini请求失败（2次）: ValueError: Gemini响应中没有JSON对象")
+                return json.dumps({"items": [{"id": ids[0]}]})
+
+            self.service._call_gemini = fake_gemini
+            responses, items = await self.service._gemini_batch_items(
+                [{"id": "good"}, {"id": "bad"}],
+                lambda values: json.dumps([item["id"] for item in values]),
+                "model",
+                "items",
+            )
+            return calls, responses, items
+
+        calls, responses, items = asyncio.run(exercise())
+        self.assertEqual(calls, [["good", "bad"], ["good"], ["bad"]])
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(items, [{"id": "good"}])
+
     def test_gemini_safe_batch_size_caps_long_json_stages(self):
         from app.service import GEMINI_SAFE_BATCH_SIZE
 
@@ -362,10 +387,9 @@ class TrendServiceTests(unittest.TestCase):
                 return json.dumps({"verified_trends": discovery["trends"]})
 
             self.service._call_gemini = fake_gemini
-            with self.assertRaisesRegex(ValueError, "可用图案池"):
-                await self.service._classify_trend_pool(run_id, self.service.get_config())
+            return await self.service._classify_trend_pool(run_id, self.service.get_config())
 
-        asyncio.run(exercise())
+        self.assertEqual(asyncio.run(exercise()), [])
         self.assertEqual(self.service.get_run(run_id)["trends"], [])
 
     def test_generation_creates_pattern_then_product_from_the_same_prompt(self):

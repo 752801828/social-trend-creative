@@ -1264,17 +1264,15 @@ Schema:
         batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(candidates), batch_size):
             batch = candidates[offset:offset + batch_size]
-            verification_text = await self._call_gemini(
-                self._classification_prompt(config, batch),
+            responses, classified = await self._gemini_batch_items(
+                batch,
+                lambda items: self._classification_prompt(config, items),
                 config["gemini_verification_model"],
-                attempts=2,
+                "classified_trends",
             )
-            raw_responses.append(verification_text)
-            payload = extract_json_object(verification_text)
-            if not isinstance(payload.get("classified_trends"), list):
-                raise ValueError("Gemini没有返回可解析的可用图案池")
+            raw_responses.extend(responses)
             trends.extend(self._normalise_candidates(
-                {"trends": payload["classified_trends"]}, None
+                {"trends": classified}, None
             ))
         for rank, trend in enumerate(trends, 1):
             trend["rank"] = rank
@@ -1567,13 +1565,12 @@ Schema:
         supplied_map: dict[str, dict[str, Any]] = {}
         batch_size = min(GEMINI_SAFE_BATCH_SIZE, int(config["candidate_count"]))
         for offset in range(0, len(trends), batch_size):
-            response_text = await self._call_gemini(
-                self._prompt_pool_prompt(trends[offset:offset + batch_size]),
+            _responses, supplied = await self._gemini_batch_items(
+                trends[offset:offset + batch_size],
+                self._prompt_pool_prompt,
                 config["gemini_verification_model"],
-                attempts=2,
+                "prompts",
             )
-            payload = extract_json_object(response_text)
-            supplied = payload.get("prompts") if isinstance(payload.get("prompts"), list) else []
             supplied_map.update({
                 str(item.get("trend_id")): {
                     "pattern_prompt": str(item.get("pattern_prompt") or "").strip(),
@@ -1600,6 +1597,30 @@ Schema:
                 prompt_ids.append(prompt_id)
         self._update_run(run_id, status="prompt_pool_ready", stage="prompt_pool")
         return prompt_ids
+
+    async def _gemini_batch_items(
+        self,
+        items: list[dict[str, Any]],
+        prompt_factory: Any,
+        model: str,
+        result_key: str,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        try:
+            response = await self._call_gemini(prompt_factory(items), model, attempts=2)
+            payload = extract_json_object(response)
+            result = payload.get(result_key)
+            if not isinstance(result, list):
+                raise ValueError(f"Gemini响应缺少{result_key}数组")
+            return [response], [item for item in result if isinstance(item, dict)]
+        except Exception as exc:
+            error = safe_error(exc)
+            if len(items) > 1 and any(marker in error for marker in ("JSON", "没有JSON", "缺少")):
+                midpoint = len(items) // 2
+                left = await self._gemini_batch_items(items[:midpoint], prompt_factory, model, result_key)
+                right = await self._gemini_batch_items(items[midpoint:], prompt_factory, model, result_key)
+                return left[0] + right[0], left[1] + right[1]
+            logger.warning("Gemini %s batch skipped after retries: %s", result_key, error)
+            return [], []
 
     async def _generate_from_prompt_pool(
         self,
