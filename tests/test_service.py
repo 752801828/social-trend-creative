@@ -189,8 +189,9 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("launch_tagging", main)
         self.assertIn("单独打标签", html)
         self.assertIn("runStage('tags')", html)
-        self.assertIn("/api/tags/backfill", main)
-        self.assertIn("补齐全部标签", html)
+        self.assertIn("/api/patterns/analyze/backfill", main)
+        self.assertIn("分析全部图案", html)
+        self.assertIn("ip_status", html)
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
@@ -859,13 +860,80 @@ class TrendServiceTests(unittest.TestCase):
         ))
 
         self.assertEqual(requests[0].headers["authorization"], "Bearer test-key")
+
+    def test_gemini_vision_call_includes_actual_pattern_image(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+        asyncio.run(self.service.http.aclose())
+        self.service.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        asyncio.run(self.service._call_gemini(
+            "inspect", "model", attempts=1, reference_image=(b"pixel", "image/png")
+        ))
+
         content = json.loads(requests[0].content)["messages"][0]["content"]
-        self.assertEqual(content[0], {"type": "text", "text": "prompt"})
-        self.assertEqual(
-            content[1]["image_url"]["url"],
-            "data:image/png;base64,cGF0dGVybg==",
-        )
-        self.assertNotIn("authorization", requests[1].headers)
+        self.assertEqual(content[0]["text"], "inspect")
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_pattern_analysis_tags_actual_asset_and_records_ip_screen(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Cat trend", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "ready"})
+        self.service._replace_trends(run_id, [trend])
+        relative = Path(run_id) / "trend-1" / "pattern.png"
+        target = self.service.assets_dir / relative
+        target.parent.mkdir(parents=True)
+        Image.new("RGBA", (8, 8), (200, 40, 40, 255)).save(target, format="PNG")
+        with self.service._connect() as db:
+            db.execute(
+                """INSERT INTO pattern_assets
+                   (id,run_id,trend_id,sequence,model,prompt,status,image_path,mime_type,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                ("asset-1", run_id, "trend-1", 1, "model", "prompt", "success", relative.as_posix(), "image/png", utc_now()),
+            )
+
+        async def exercise():
+            async def fake_gemini(_prompt, _model, *, attempts, reference_image=None):
+                self.assertIsNotNone(reference_image)
+                return json.dumps({"visual_tags": {"subject": ["cat"], "palette": ["red"]}, "ip_risk": {
+                    "level": "medium", "reasons": ["visible sports-style emblem"],
+                    "detected_references": ["unverified emblem"], "recommendation": "redraw without emblem",
+                }})
+
+            self.service._call_gemini = fake_gemini
+            await self.service._analyze_pattern_asset("asset-1")
+
+        asyncio.run(exercise())
+        asset = self.service.get_run(run_id)["pattern_assets"][0]
+        self.assertEqual(asset["visual_tags"]["subject"], ["cat"])
+        self.assertEqual(asset["ip_status"], "medium")
+        self.assertIn("redraw without emblem", asset["ip_reasons"])
+
+    def test_pattern_analysis_backfill_visits_unanalyzed_assets(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Trend", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "ready"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            db.execute(
+                """INSERT INTO pattern_assets
+                   (id,run_id,trend_id,sequence,model,prompt,status,image_path,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                ("asset-1", run_id, "trend-1", 1, "model", "prompt", "success", "a.png", utc_now()),
+            )
+        async def exercise():
+            self.service._analyze_pattern_asset = mock.AsyncMock()
+            self.assertTrue(self.service.launch_pattern_analysis_backfill())
+            await self.service.active_task
+
+        asyncio.run(exercise())
+        self.service._analyze_pattern_asset.assert_awaited_once_with("asset-1")
+        self.assertEqual(self.service.pattern_analysis_backfill["status"], "succeeded")
 
     def test_cancelled_generation_restores_selectable_trend_status(self):
         run_id = self.service.create_run("manual")

@@ -248,6 +248,10 @@ class TrendService:
             "status": "idle", "total_runs": 0, "completed_runs": 0,
             "current_run_id": "", "error": "", "updated_at": utc_now(),
         }
+        self.pattern_analysis_backfill = {
+            "status": "idle", "total_assets": 0, "completed_assets": 0,
+            "current_asset_id": "", "error": "", "updated_at": utc_now(),
+        }
         self.source_sync_task: asyncio.Task | None = None
         self.source_sync_lock = asyncio.Lock()
         self.scheduler_task: asyncio.Task | None = None
@@ -400,6 +404,12 @@ class TrendService:
                     raw_response TEXT NOT NULL DEFAULT '',
                     has_transparency INTEGER NOT NULL DEFAULT 0,
                     background_removed INTEGER NOT NULL DEFAULT 0,
+                    visual_tags TEXT NOT NULL DEFAULT '{}',
+                    ip_status TEXT NOT NULL DEFAULT 'pending',
+                    ip_reasons TEXT NOT NULL DEFAULT '[]',
+                    ip_matches TEXT NOT NULL DEFAULT '[]',
+                    ip_error TEXT NOT NULL DEFAULT '',
+                    ip_checked_at TEXT,
                     created_at TEXT NOT NULL,
                     finished_at TEXT
                 );
@@ -484,6 +494,16 @@ class TrendService:
                 db.execute("ALTER TABLE pattern_assets ADD COLUMN has_transparency INTEGER NOT NULL DEFAULT 0")
             if "background_removed" not in pattern_columns:
                 db.execute("ALTER TABLE pattern_assets ADD COLUMN background_removed INTEGER NOT NULL DEFAULT 0")
+            for name, definition in (
+                ("visual_tags", "TEXT NOT NULL DEFAULT '{}'"),
+                ("ip_status", "TEXT NOT NULL DEFAULT 'pending'"),
+                ("ip_reasons", "TEXT NOT NULL DEFAULT '[]'"),
+                ("ip_matches", "TEXT NOT NULL DEFAULT '[]'"),
+                ("ip_error", "TEXT NOT NULL DEFAULT ''"),
+                ("ip_checked_at", "TEXT"),
+            ):
+                if name not in pattern_columns:
+                    db.execute(f"ALTER TABLE pattern_assets ADD COLUMN {name} {definition}")
             source_columns = {row["name"] for row in db.execute("PRAGMA table_info(source_entries)")}
             for name in ("title_zh", "summary_zh"):
                 if name not in source_columns:
@@ -968,6 +988,123 @@ class TrendService:
             "total_prompts": total,
             "tagged_prompts": tagged,
             "pending_prompts": max(0, total - tagged),
+        }
+
+    def launch_pattern_analysis_backfill(self) -> bool:
+        if self.active_task and not self.active_task.done():
+            return False
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT id FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL
+                   AND (visual_tags='{}' OR ip_status IN ('pending','error')) ORDER BY created_at"""
+            ).fetchall()
+        asset_ids = [row["id"] for row in rows]
+        if not asset_ids:
+            raise ValueError("所有图案已经完成视觉标签和侵权风险筛查，或图案库为空")
+        self.pattern_analysis_backfill = {
+            "status": "pending", "total_assets": len(asset_ids), "completed_assets": 0,
+            "current_asset_id": asset_ids[0], "error": "", "updated_at": utc_now(),
+        }
+        return self._launch(
+            "pattern-analysis", self._backfill_pattern_analysis(asset_ids), "pattern-analysis-backfill"
+        )
+
+    async def _backfill_pattern_analysis(self, asset_ids: list[str]) -> None:
+        errors = []
+        async with self.operation_lock:
+            self.pattern_analysis_backfill["status"] = "running"
+            self.pattern_analysis_backfill["updated_at"] = utc_now()
+            for index, asset_id in enumerate(asset_ids, 1):
+                self.pattern_analysis_backfill["current_asset_id"] = asset_id
+                self.pattern_analysis_backfill["updated_at"] = utc_now()
+                try:
+                    await self._analyze_pattern_asset(asset_id)
+                except Exception as exc:
+                    message = safe_error(exc)
+                    errors.append(f"{asset_id}: {message}")
+                    with self._connect() as db:
+                        db.execute(
+                            "UPDATE pattern_assets SET ip_status='error',ip_error=? WHERE id=?",
+                            (message, asset_id),
+                        )
+                self.pattern_analysis_backfill["completed_assets"] = index
+                self.pattern_analysis_backfill["updated_at"] = utc_now()
+            self.pattern_analysis_backfill["status"] = "failed" if errors else "succeeded"
+            self.pattern_analysis_backfill["error"] = "; ".join(errors)[:1000]
+            self.pattern_analysis_backfill["current_asset_id"] = ""
+            self.pattern_analysis_backfill["updated_at"] = utc_now()
+        self.active_run_id = None
+
+    @staticmethod
+    def _pattern_analysis_prompt(asset: dict[str, Any]) -> str:
+        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. Use concise English arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Leave a key empty when not visually supported.
+
+Then perform an IP risk screen. This is not legal advice and must not claim legal clearance. Look for visible logos, brand marks, copyrighted characters, celebrity/public-figure likenesses, copied artwork signatures, readable protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Assign level low, medium, high, or unknown. Return reasons, detected_references, and a concise recommendation.
+
+Context only: {asset['topic_zh']} / {asset['topic_en']}
+
+Schema:
+{{"visual_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"product":[],"audience":[],"risk_controls":[]}},"ip_risk":{{"level":"low","reasons":[],"detected_references":[],"recommendation":""}}}}"""
+
+    @staticmethod
+    def _pattern_analysis_image(path: Path) -> tuple[bytes, str]:
+        with Image.open(path) as opened:
+            image = opened.convert("RGBA")
+        image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        output = BytesIO()
+        image.save(output, format="PNG", optimize=True)
+        return output.getvalue(), "image/png"
+
+    async def _analyze_pattern_asset(self, asset_id: str) -> None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT a.*,t.topic_zh,t.topic_en FROM pattern_assets a
+                   JOIN trends t ON t.id=a.trend_id WHERE a.id=?""", (asset_id,)
+            ).fetchone()
+        if not row or not row["image_path"]:
+            raise ValueError("图案资产不存在或没有图片")
+        asset = dict(row)
+        target = (self.assets_dir / asset["image_path"]).resolve()
+        if target.parent == self.assets_dir.resolve() or not target.is_relative_to(self.assets_dir.resolve()) or not target.exists():
+            raise ValueError("图案文件不存在或路径不安全")
+        response = await self._call_gemini(
+            self._pattern_analysis_prompt(asset),
+            self.get_config()["gemini_verification_model"],
+            attempts=2,
+            reference_image=self._pattern_analysis_image(target),
+        )
+        payload = extract_json_object(response)
+        risk = payload.get("ip_risk") if isinstance(payload.get("ip_risk"), dict) else {}
+        level = str(risk.get("level") or "unknown").lower()
+        if level not in {"low", "medium", "high", "unknown"}:
+            level = "unknown"
+        reasons = string_list(risk.get("reasons"), limit=8, item_limit=240)
+        matches = string_list(risk.get("detected_references"), limit=8, item_limit=160)
+        recommendation = str(risk.get("recommendation") or "")[:500]
+        if recommendation:
+            reasons.append(recommendation)
+        with self._connect() as db:
+            db.execute(
+                """UPDATE pattern_assets SET visual_tags=?,ip_status=?,ip_reasons=?,ip_matches=?,
+                   ip_error='',ip_checked_at=? WHERE id=?""",
+                (json_text(normalise_creative_tags(payload.get("visual_tags"))), level,
+                 json_text(reasons), json_text(matches), utc_now(), asset_id),
+            )
+
+    def pattern_analysis_state(self) -> dict[str, Any]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT visual_tags,ip_status FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL"
+            ).fetchall()
+        total = len(rows)
+        tagged = sum(bool(any(normalise_creative_tags(row["visual_tags"]).values())) for row in rows)
+        screened = sum(row["ip_status"] not in {"pending", "error"} for row in rows)
+        return {
+            **self.pattern_analysis_backfill,
+            "total_assets": total,
+            "tagged_assets": tagged,
+            "screened_assets": screened,
+            "pending_assets": max(0, total - min(tagged, screened)),
         }
 
     def launch_sellability_scoring(self, run_id: str) -> bool:
@@ -2125,18 +2262,34 @@ Schema:
                     db.execute("UPDATE trends SET status = 'generation_failed' WHERE id = ?", (trend_id,))
             return False
 
-    async def _call_gemini(self, prompt: str, model: str, *, attempts: int) -> str:
+    async def _call_gemini(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        attempts: int,
+        reference_image: tuple[bytes, str] | None = None,
+    ) -> str:
         if not self.gemini_api_key:
             raise RuntimeError("GEMINI_API_KEY未配置")
         error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
+                content: str | list[dict[str, Any]] = prompt
+                if reference_image:
+                    image_bytes, mime_type = reference_image
+                    content = [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+                        }},
+                    ]
                 response = await self.http.post(
                     f"{self.gemini_base_url}/v1/chat/completions",
                     headers={"Authorization": f"Bearer {self.gemini_api_key}"},
                     json={
                         "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
+                        "messages": [{"role": "user", "content": content}],
                         "stream": False,
                     },
                     timeout=300,
@@ -2607,9 +2760,8 @@ Requirements:
                     "SELECT COUNT(*) FROM pattern_assets WHERE image_path IS NOT NULL"
                 ).fetchone()[0])
                 rows = db.execute(
-                    """SELECT a.*,p.creative_tags,t.topic_zh,r.started_at AS run_started_at
+                    """SELECT a.*,t.topic_zh,r.started_at AS run_started_at
                        FROM pattern_assets a JOIN trends t ON t.id=a.trend_id
-                       LEFT JOIN prompt_pool p ON p.id=a.prompt_id
                        JOIN runs r ON r.id=a.run_id WHERE a.image_path IS NOT NULL
                        ORDER BY a.created_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset),
@@ -2619,7 +2771,9 @@ Requirements:
                     item = dict(row)
                     topic_zh = item.pop("topic_zh")
                     run_started_at = item.pop("run_started_at")
-                    item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
+                    item["visual_tags"] = normalise_creative_tags(item.get("visual_tags"))
+                    for key in ("ip_reasons", "ip_matches"):
+                        item[key] = json.loads(item[key])
                     item["image_url"] = f"/assets/{item['image_path']}"
                     entries.append({
                         "item": item,
@@ -2633,11 +2787,11 @@ Requirements:
                 ).fetchone()[0])
                 rows = db.execute(
                     """SELECT g.id,g.run_id,g.trend_id,g.prompt_id,g.pattern_asset_id,g.sequence,g.model,g.prompt,
-                              p.creative_tags,
+                              a.visual_tags,a.ip_status,a.ip_reasons,a.ip_matches,a.ip_error,a.ip_checked_at,
                               g.status,g.image_path,g.mime_type,g.duration_ms,g.error,g.created_at,
                               g.finished_at,t.topic_zh,r.started_at AS run_started_at
                        FROM generations g JOIN trends t ON t.id=g.trend_id
-                       LEFT JOIN prompt_pool p ON p.id=g.prompt_id
+                       LEFT JOIN pattern_assets a ON a.id=g.pattern_asset_id
                        JOIN runs r ON r.id=g.run_id WHERE g.image_path IS NOT NULL
                        ORDER BY g.created_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset),
@@ -2647,7 +2801,9 @@ Requirements:
                     item = dict(row)
                     topic_zh = item.pop("topic_zh")
                     run_started_at = item.pop("run_started_at")
-                    item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
+                    item["visual_tags"] = normalise_creative_tags(item.get("visual_tags"))
+                    for key in ("ip_reasons", "ip_matches"):
+                        item[key] = json.loads(item[key] or "[]")
                     item["image_url"] = f"/assets/{item['image_path']}"
                     entries.append({
                         "item": item,
@@ -2752,7 +2908,7 @@ Requirements:
         table_map = {
             "trends": ("trends t", "t.id", "t.created_at", "t.topic_zh", "t.category"),
             "patterns": ("pattern_assets a JOIN trends t ON t.id=a.trend_id", "a.id", "a.created_at", "t.topic_zh", "t.category"),
-            "images": ("generations g JOIN trends t ON t.id=g.trend_id", "g.id", "g.created_at", "t.topic_zh", "t.category"),
+            "images": ("generations g JOIN trends t ON t.id=g.trend_id LEFT JOIN pattern_assets a ON a.id=g.pattern_asset_id", "g.id", "g.created_at", "t.topic_zh", "t.category"),
             "sellability": ("raw_sellability_pool s", "s.id", "s.created_at", "s.topic_zh", "s.category"),
         }
         if pool not in table_map:
@@ -2793,7 +2949,8 @@ Requirements:
             select = f"t.*,r.started_at AS run_started_at,{score_select}"
         else:
             alias = "a" if pool == "patterns" else "g"
-            select = f"{alias}.*,t.topic_zh,t.category,r.started_at AS run_started_at,{score_select}"
+            analysis_select = "" if pool == "patterns" else ",a.visual_tags,a.ip_status,a.ip_reasons,a.ip_matches,a.ip_error,a.ip_checked_at"
+            select = f"{alias}.*,t.topic_zh,t.category,r.started_at AS run_started_at,{score_select}{analysis_select}"
         with self._connect() as db:
             total = int(db.execute(f"SELECT COUNT(*) FROM {table}{where_sql}", params).fetchone()[0])
             rows = db.execute(
@@ -2822,6 +2979,9 @@ Requirements:
                 entries.append({"item": item, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
             else:
                 topic_zh, item_category = item.pop("topic_zh"), item.pop("category")
+                item["visual_tags"] = normalise_creative_tags(item.get("visual_tags"))
+                for key in ("ip_reasons", "ip_matches"):
+                    item[key] = json.loads(item.get(key) or "[]")
                 item["image_url"] = f"/assets/{item['image_path']}"
                 entries.append({"item": item, "trend": {"id": item["trend_id"], "topic_zh": topic_zh, "category": item_category}, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
         return {"entries": entries, "total": total}
@@ -2835,14 +2995,12 @@ Requirements:
                 "SELECT * FROM trends WHERE run_id = ? ORDER BY rank", (run_id,)
             ).fetchall()]
             generations = [dict(row) for row in db.execute(
-                """SELECT g.*,p.creative_tags FROM generations g
-                   LEFT JOIN prompt_pool p ON p.id=g.prompt_id
+                """SELECT g.*,a.visual_tags,a.ip_status,a.ip_reasons,a.ip_matches,a.ip_error,a.ip_checked_at
+                   FROM generations g LEFT JOIN pattern_assets a ON a.id=g.pattern_asset_id
                    WHERE g.run_id = ? ORDER BY g.created_at""", (run_id,)
             ).fetchall()]
             pattern_assets = [dict(row) for row in db.execute(
-                """SELECT a.*,p.creative_tags FROM pattern_assets a
-                   LEFT JOIN prompt_pool p ON p.id=a.prompt_id
-                   WHERE a.run_id=? ORDER BY a.created_at""", (run_id,)
+                "SELECT * FROM pattern_assets WHERE run_id=? ORDER BY created_at", (run_id,)
             ).fetchall()]
             prompt_pool = [dict(row) for row in db.execute(
                 """SELECT p.*, t.topic_zh, t.category FROM prompt_pool p
@@ -2857,8 +3015,12 @@ Requirements:
                   "SELECT * FROM raw_sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
                   (run_id,),
               ).fetchall()]
-        for item in generations + pattern_assets + prompt_pool:
+        for item in prompt_pool:
             item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
+        for item in generations + pattern_assets:
+            item["visual_tags"] = normalise_creative_tags(item.get("visual_tags"))
+            for key in ("ip_reasons", "ip_matches"):
+                item[key] = json.loads(item.get(key) or "[]")
         score_map = {}
         for score in sellability_pool:
             for key in ("metrics", "recommended_products", "risk_reasons"):

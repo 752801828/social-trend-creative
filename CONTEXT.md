@@ -54,6 +54,14 @@ A new design direction that keeps a source event and selected tag dimensions whi
 An optional operation that adds a creative tag set to an existing prompt-pool entry without rewriting either stored prompt or regenerating artwork.
 _Avoid_: Prompt generation, image analysis
 
+**Pattern visual tag set**:
+A structured description of pixels in one stored pattern asset. It is attached to the actual generated artwork, rather than to the prompt that requested it.
+_Avoid_: Prompt tags, product metadata
+
+**IP risk screen**:
+An AI visual review of a pattern asset for visible signs of trademarks, protected characters, public-figure likenesses, copied artwork, and similar risks. It is a triage signal, not legal clearance or an infringement decision.
+_Avoid_: Copyright approval, legal opinion
+
 **Prompt-first discovery**:
 Asking Gemini Web to research public sources and return raw trends. It is not proof of live browsing; real evidence is retained when available but is not a pipeline gate.
 
