@@ -138,6 +138,7 @@ Source entry → Source cluster → Raw trend → Pattern-pool entry → Prompt-
 - `POST /api/runs/{run_id}/tags`：只为该任务中尚无标签的提示词补齐结构化创意标签
 - `POST /api/tags/backfill`：遍历所有历史任务，补齐全部空标签提示词；状态从 `/api/state.tagging` 查看
 - `POST /api/patterns/analyze/backfill`：为所有未分析的实际图案 PNG 补视觉标签并执行 AI 侵权风险筛查；状态从 `/api/state.pattern_analysis` 查看
+- `POST /api/patterns/analyze/backfill?force=true`：覆盖重分析全部图案，输出中文标签和中文风险说明；`POST /api/runs/pattern-analysis/cancel` 停止当前图案分析，已完成结果保留
 - `POST /api/runs/{run_id}/patterns`：④随机生成独立图案，JSON 为 `{}` 或 `{"count":3}`
 - `POST /api/runs/{run_id}/products`：⑤用未消费图案生成产品图
 - `POST /api/runs/{run_id}/generate`：兼容入口，连续执行④⑤

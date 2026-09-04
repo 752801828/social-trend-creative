@@ -990,13 +990,14 @@ class TrendService:
             "pending_prompts": max(0, total - tagged),
         }
 
-    def launch_pattern_analysis_backfill(self) -> bool:
+    def launch_pattern_analysis_backfill(self, *, force: bool = False) -> bool:
         if self.active_task and not self.active_task.done():
             return False
         with self._connect() as db:
+            condition = "" if force else "AND (visual_tags='{}' OR ip_status IN ('pending','error'))"
             rows = db.execute(
-                """SELECT id FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL
-                   AND (visual_tags='{}' OR ip_status IN ('pending','error')) ORDER BY created_at"""
+                f"""SELECT id FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL
+                    {condition} ORDER BY created_at"""
             ).fetchall()
         asset_ids = [row["id"] for row in rows]
         if not asset_ids:
@@ -1011,35 +1012,42 @@ class TrendService:
 
     async def _backfill_pattern_analysis(self, asset_ids: list[str]) -> None:
         errors = []
-        async with self.operation_lock:
-            self.pattern_analysis_backfill["status"] = "running"
-            self.pattern_analysis_backfill["updated_at"] = utc_now()
-            for index, asset_id in enumerate(asset_ids, 1):
-                self.pattern_analysis_backfill["current_asset_id"] = asset_id
+        try:
+            async with self.operation_lock:
+                self.pattern_analysis_backfill["status"] = "running"
                 self.pattern_analysis_backfill["updated_at"] = utc_now()
-                try:
-                    await self._analyze_pattern_asset(asset_id)
-                except Exception as exc:
-                    message = safe_error(exc)
-                    errors.append(f"{asset_id}: {message}")
-                    with self._connect() as db:
-                        db.execute(
-                            "UPDATE pattern_assets SET ip_status='error',ip_error=? WHERE id=?",
-                            (message, asset_id),
-                        )
-                self.pattern_analysis_backfill["completed_assets"] = index
+                for index, asset_id in enumerate(asset_ids, 1):
+                    self.pattern_analysis_backfill["current_asset_id"] = asset_id
+                    self.pattern_analysis_backfill["updated_at"] = utc_now()
+                    try:
+                        await self._analyze_pattern_asset(asset_id)
+                    except Exception as exc:
+                        message = safe_error(exc)
+                        errors.append(f"{asset_id}: {message}")
+                        with self._connect() as db:
+                            db.execute(
+                                "UPDATE pattern_assets SET ip_status='error',ip_error=? WHERE id=?",
+                                (message, asset_id),
+                            )
+                    self.pattern_analysis_backfill["completed_assets"] = index
+                    self.pattern_analysis_backfill["updated_at"] = utc_now()
+                self.pattern_analysis_backfill["status"] = "failed" if errors else "succeeded"
+                self.pattern_analysis_backfill["error"] = "; ".join(errors)[:1000]
+                self.pattern_analysis_backfill["current_asset_id"] = ""
                 self.pattern_analysis_backfill["updated_at"] = utc_now()
-            self.pattern_analysis_backfill["status"] = "failed" if errors else "succeeded"
-            self.pattern_analysis_backfill["error"] = "; ".join(errors)[:1000]
+        except asyncio.CancelledError:
+            self.pattern_analysis_backfill["status"] = "cancelled"
             self.pattern_analysis_backfill["current_asset_id"] = ""
             self.pattern_analysis_backfill["updated_at"] = utc_now()
-        self.active_run_id = None
+            raise
+        finally:
+            self.active_run_id = None
 
     @staticmethod
     def _pattern_analysis_prompt(asset: dict[str, Any]) -> str:
-        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. Use concise English arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Leave a key empty when not visually supported.
+        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. All tag values, risk reasons, detected references, and recommendations MUST be concise Simplified Chinese. Use arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Leave a key empty when not visually supported.
 
-Then perform an IP risk screen. This is not legal advice and must not claim legal clearance. Look for visible logos, brand marks, copyrighted characters, celebrity/public-figure likenesses, copied artwork signatures, readable protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Assign level low, medium, high, or unknown. Return reasons, detected_references, and a concise recommendation.
+Then perform an IP risk screen. This is not legal advice and must not claim legal clearance. Look for visible logos, brand marks, copyrighted characters, celebrity/public-figure likenesses, copied artwork signatures, readable protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Assign level low, medium, high, or unknown. Return reasons, detected_references, and a concise recommendation in Simplified Chinese.
 
 Context only: {asset['topic_zh']} / {asset['topic_en']}
 

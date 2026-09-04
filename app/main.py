@@ -272,9 +272,9 @@ async def backfill_tags():
 
 
 @app.post("/api/patterns/analyze/backfill", status_code=202)
-async def backfill_pattern_analysis():
+async def backfill_pattern_analysis(force: bool = Query(default=False)):
     try:
-        launched = service.launch_pattern_analysis_backfill()
+        launched = service.launch_pattern_analysis_backfill(force=force)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:

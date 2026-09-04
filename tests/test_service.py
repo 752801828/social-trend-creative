@@ -192,6 +192,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("/api/patterns/analyze/backfill", main)
         self.assertIn("分析全部图案", html)
         self.assertIn("ip_status", html)
+        self.assertIn("force=true", html)
+        self.assertIn("停止图案分析", html)
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)
@@ -934,6 +936,29 @@ class TrendServiceTests(unittest.TestCase):
         asyncio.run(exercise())
         self.service._analyze_pattern_asset.assert_awaited_once_with("asset-1")
         self.assertEqual(self.service.pattern_analysis_backfill["status"], "succeeded")
+
+    def test_pattern_analysis_force_revisits_existing_labels(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Trend", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "ready"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            db.execute(
+                """INSERT INTO pattern_assets
+                   (id,run_id,trend_id,sequence,model,prompt,status,image_path,visual_tags,ip_status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("asset-1", run_id, "trend-1", 1, "model", "prompt", "success", "a.png",
+                 '{"subject":["cat"]}', "low", utc_now()),
+            )
+
+        async def exercise():
+            self.service._analyze_pattern_asset = mock.AsyncMock()
+            self.assertTrue(self.service.launch_pattern_analysis_backfill(force=True))
+            await self.service.active_task
+
+        asyncio.run(exercise())
+        self.service._analyze_pattern_asset.assert_awaited_once_with("asset-1")
 
     def test_cancelled_generation_restores_selectable_trend_status(self):
         run_id = self.service.create_run("manual")
