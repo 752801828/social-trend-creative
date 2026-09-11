@@ -1061,6 +1061,55 @@ class TrendService:
             "pattern-analysis", self._backfill_pattern_analysis(asset_ids), "pattern-analysis-backfill"
         )
 
+    def launch_pattern_analysis(self, asset_id: str) -> bool:
+        """Queue visual/IP analysis for one generated pattern asset."""
+        if self.active_task and not self.active_task.done():
+            return False
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,status,image_path FROM pattern_assets WHERE id=?", (asset_id,)
+            ).fetchone()
+        if not row:
+            raise ValueError("图案资产不存在")
+        if row["status"] != "success" or not row["image_path"]:
+            raise ValueError("该图案尚未生成成功，暂不能分析")
+        self.pattern_analysis_backfill = {
+            "status": "pending", "total_assets": 1, "completed_assets": 0,
+            "current_asset_id": asset_id, "error": "", "updated_at": utc_now(),
+        }
+        return self._launch(
+            "pattern-analysis", self._analyze_one_pattern(asset_id), "pattern-analysis-one"
+        )
+
+    async def _analyze_one_pattern(self, asset_id: str) -> None:
+        try:
+            async with self.operation_lock:
+                self.pattern_analysis_backfill["status"] = "running"
+                self.pattern_analysis_backfill["updated_at"] = utc_now()
+                await self._analyze_pattern_asset(asset_id)
+                self.pattern_analysis_backfill["completed_assets"] = 1
+                self.pattern_analysis_backfill["status"] = "succeeded"
+                self.pattern_analysis_backfill["current_asset_id"] = ""
+                self.pattern_analysis_backfill["updated_at"] = utc_now()
+        except asyncio.CancelledError:
+            self.pattern_analysis_backfill["status"] = "cancelled"
+            self.pattern_analysis_backfill["current_asset_id"] = ""
+            self.pattern_analysis_backfill["updated_at"] = utc_now()
+            raise
+        except Exception as exc:
+            message = safe_error(exc)
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE pattern_assets SET ip_status='error',ip_error=? WHERE id=?",
+                    (message, asset_id),
+                )
+            self.pattern_analysis_backfill.update({
+                "status": "failed", "error": message, "current_asset_id": "",
+                "updated_at": utc_now(),
+            })
+        finally:
+            self.active_run_id = None
+
     async def _backfill_pattern_analysis(self, asset_ids: list[str]) -> None:
         errors = []
         try:

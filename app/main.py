@@ -350,6 +350,17 @@ async def backfill_pattern_analysis(force: bool = Query(default=False)):
     return {"status": "accepted"}
 
 
+@app.post("/api/patterns/{asset_id}/analyze", status_code=202)
+async def analyze_pattern(asset_id: str):
+    try:
+        launched = service.launch_pattern_analysis(asset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    return {"asset_id": asset_id, "status": "accepted"}
+
+
 @app.post("/api/runs/{run_id}/generate", status_code=202)
 async def generate(run_id: str, request: PoolRequest):
     try:
