@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import sqlite3
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -107,10 +108,10 @@ async def health():
 
 
 @app.get("/api/state")
-def state(limit: int = Query(default=40, ge=1, le=200)):
-    def safe(fn, fallback):
+async def state(limit: int = Query(default=40, ge=1, le=200)):
+    async def safe(fn, fallback):
         try:
-            return fn()
+            return await asyncio.to_thread(fn)
         except sqlite3.OperationalError:
             return fallback
 
@@ -143,18 +144,27 @@ def state(limit: int = Query(default=40, ge=1, le=200)):
         "screened_assets": 0,
         "pending_assets": 0,
     }
-    return {
-        "config": safe(service.get_config, {}),
-        "connections": safe(service.connection_info, {}),
-        "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
-        "dashboard": safe(service.dashboard, dashboard_fallback),
-        "runs": safe(lambda: service.list_runs(limit), []),
-        "tagging": safe(service.tagging_state, tagging_fallback),
-        "pattern_analysis": safe(service.pattern_analysis_state, pattern_analysis_fallback),
-        "source_state": safe(
+    config, connections, dashboard, runs, tagging, pattern_analysis, source_state = await asyncio.gather(
+        safe(service.get_config, {}),
+        safe(service.connection_info, {}),
+        safe(service.dashboard, dashboard_fallback),
+        safe(lambda: service.list_runs(limit), []),
+        safe(service.tagging_state, tagging_fallback),
+        safe(service.pattern_analysis_state, pattern_analysis_fallback),
+        safe(
             service.source_state,
             {"syncing": False, "sync": {}, "sources": [], "total_entries": 0, "recent_entries": 0},
         ),
+    )
+    return {
+        "config": config,
+        "connections": connections,
+        "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
+        "dashboard": dashboard,
+        "runs": runs,
+        "tagging": tagging,
+        "pattern_analysis": pattern_analysis,
+        "source_state": source_state,
         "update": read_update_status(),
     }
 
