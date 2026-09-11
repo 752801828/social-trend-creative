@@ -197,6 +197,9 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("ip_status", html)
         self.assertIn("force=true", html)
         self.assertIn("停止图案分析", html)
+        self.assertIn("当前任务", html)
+        self.assertIn("currentTaskInfo", html)
+        self.assertIn("openCurrentTask", html)
 
     def test_flow_catalog_excludes_2k_and_4k(self):
         self.assertTrue(FLOW_MODELS)

@@ -50,6 +50,11 @@ _state_cache: dict[int, tuple[float, dict]] = {}
 _state_cache_lock = asyncio.Lock()
 
 
+def invalidate_state_cache() -> None:
+    """Drop the short-lived dashboard snapshot after a task is launched."""
+    _state_cache.clear()
+
+
 @app.middleware("http")
 async def cache_static_assets(request, call_next):
     response = await call_next(request)
@@ -149,6 +154,7 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "total_assets": service.pattern_analysis_backfill.get("total_assets", 0),
         "completed_assets": service.pattern_analysis_backfill.get("completed_assets", 0),
         "current_asset_id": service.pattern_analysis_backfill.get("current_asset_id", ""),
+        "run_id": service.pattern_analysis_backfill.get("run_id", ""),
         "error": service.pattern_analysis_backfill.get("error", ""),
         "updated_at": service.pattern_analysis_backfill.get("updated_at", ""),
         "tagged_assets": 0,
@@ -195,6 +201,7 @@ async def sync_sources():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="外媒来源同步已在运行")
+    invalidate_state_cache()
     return {"status": "accepted"}
 
 
@@ -276,6 +283,7 @@ async def discover():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=False)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "stages": ["acquisition", "classification", "prompt_pool"]}
 
 
@@ -284,6 +292,7 @@ async def full_run():
     run_id = service.launch_full_pipeline(trigger_type="manual", auto_generate=True)
     if not run_id:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "auto_generate": True}
 
 
@@ -303,6 +312,7 @@ async def classify(run_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted"}
 
 
@@ -314,6 +324,7 @@ async def prompts(run_id: str, request: PoolRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
@@ -325,6 +336,7 @@ async def tag_prompts(run_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted"}
 
 
@@ -336,6 +348,7 @@ async def backfill_tags():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"status": "accepted"}
 
 
@@ -347,6 +360,7 @@ async def backfill_pattern_analysis(force: bool = Query(default=False)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"status": "accepted"}
 
 
@@ -358,6 +372,7 @@ async def analyze_pattern(asset_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"asset_id": asset_id, "status": "accepted"}
 
 
@@ -369,6 +384,7 @@ async def generate(run_id: str, request: PoolRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
@@ -380,6 +396,7 @@ async def generate_patterns(run_id: str, request: PoolRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
@@ -391,6 +408,7 @@ async def generate_products(run_id: str, request: PoolRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:
         raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
     return {"run_id": run_id, "status": "accepted", "count": request.count}
 
 
@@ -399,6 +417,7 @@ async def cancel(run_id: str):
     if service.active_run_id != run_id or not service.active_task or service.active_task.done():
         return {"cancelled": False}
     service.active_task.cancel()
+    invalidate_state_cache()
     return {"cancelled": True}
 
 

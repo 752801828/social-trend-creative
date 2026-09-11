@@ -280,7 +280,7 @@ class TrendService:
         }
         self.pattern_analysis_backfill = {
             "status": "idle", "total_assets": 0, "completed_assets": 0,
-            "current_asset_id": "", "error": "", "updated_at": utc_now(),
+            "current_asset_id": "", "run_id": "", "error": "", "updated_at": utc_now(),
         }
         self.source_sync_task: asyncio.Task | None = None
         self.source_sync_lock = asyncio.Lock()
@@ -1055,7 +1055,7 @@ class TrendService:
             raise ValueError("所有图案已经完成视觉标签和侵权风险筛查，或图案库为空")
         self.pattern_analysis_backfill = {
             "status": "pending", "total_assets": len(asset_ids), "completed_assets": 0,
-            "current_asset_id": asset_ids[0], "error": "", "updated_at": utc_now(),
+            "current_asset_id": asset_ids[0], "run_id": "pattern-analysis", "error": "", "updated_at": utc_now(),
         }
         return self._launch(
             "pattern-analysis", self._backfill_pattern_analysis(asset_ids), "pattern-analysis-backfill"
@@ -1067,7 +1067,7 @@ class TrendService:
             return False
         with self._connect() as db:
             row = db.execute(
-                "SELECT id,status,image_path FROM pattern_assets WHERE id=?", (asset_id,)
+                "SELECT id,run_id,status,image_path FROM pattern_assets WHERE id=?", (asset_id,)
             ).fetchone()
         if not row:
             raise ValueError("图案资产不存在")
@@ -1075,7 +1075,7 @@ class TrendService:
             raise ValueError("该图案尚未生成成功，暂不能分析")
         self.pattern_analysis_backfill = {
             "status": "pending", "total_assets": 1, "completed_assets": 0,
-            "current_asset_id": asset_id, "error": "", "updated_at": utc_now(),
+            "current_asset_id": asset_id, "run_id": row["run_id"], "error": "", "updated_at": utc_now(),
         }
         return self._launch(
             "pattern-analysis", self._analyze_one_pattern(asset_id), "pattern-analysis-one"
