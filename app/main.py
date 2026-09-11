@@ -5,6 +5,7 @@ import os
 import secrets
 import sqlite3
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,6 +46,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Social Trend Creative", version="0.1.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+_state_cache: dict[int, tuple[float, dict]] = {}
+_state_cache_lock = asyncio.Lock()
 
 
 @app.middleware("http")
@@ -109,6 +112,14 @@ async def health():
 
 @app.get("/api/state")
 async def state(limit: int = Query(default=40, ge=1, le=200)):
+    cached = _state_cache.get(limit)
+    if cached and time.monotonic() - cached[0] < 5:
+        return cached[1]
+    async with _state_cache_lock:
+        cached = _state_cache.get(limit)
+        if cached and time.monotonic() - cached[0] < 5:
+            return cached[1]
+
     async def safe(fn, fallback):
         try:
             return await asyncio.to_thread(fn)
@@ -156,7 +167,7 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
             {"syncing": False, "sync": {}, "sources": [], "total_entries": 0, "recent_entries": 0},
         ),
     )
-    return {
+    payload = {
         "config": config,
         "connections": connections,
         "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
@@ -167,6 +178,8 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "source_state": source_state,
         "update": read_update_status(),
     }
+    _state_cache[limit] = (time.monotonic(), payload)
+    return payload
 
 
 @app.get("/api/sources")
