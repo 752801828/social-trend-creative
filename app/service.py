@@ -92,8 +92,24 @@ GEMINI_SAFE_BATCH_SIZE = 5
 EMPTY_RUN_STALE_MINUTES = 10
 CREATIVE_TAG_KEYS = (
     "subject", "action", "setting", "style", "palette", "composition",
-    "mood", "texture", "typography", "product", "audience", "risk_controls",
+    "mood", "texture", "typography", "audience", "risk_controls",
 )
+
+_TAG_CANONICAL = {
+    "cat": "猫", "cats": "猫", "feline": "猫", "dog": "狗", "dogs": "狗", "canine": "狗",
+    "person": "人物", "people": "人物", "human": "人物", "humans": "人物", "athlete": "运动员", "athletes": "运动员",
+    "panda": "熊猫", "bird": "鸟", "birds": "鸟", "flower": "花卉", "flowers": "花卉",
+    "running": "奔跑", "run": "奔跑", "running": "奔跑", "fighting": "对抗", "fight": "对抗", "holding": "持握",
+    "standing": "站立", "flying": "飞行", "dancing": "舞动", "jumping": "跳跃", "walking": "行走",
+    "city": "城市", "urban": "城市", "street": "街道", "field": "场地", "stadium": "体育场", "ocean": "海洋", "forest": "森林",
+    "comic": "漫画", "editorial": "编辑插画", "editorial comic": "编辑插画", "original editorial comic": "原创编辑插画", "illustration": "插画", "minimalist": "极简", "minimal": "极简", "vintage": "复古", "retro": "复古",
+    "blue": "蓝色", "navy": "深蓝", "silver": "银灰", "red": "红色", "green": "绿色", "yellow": "黄色", "orange": "橙色", "purple": "紫色", "black": "黑色", "white": "白色", "multicolor": "多色",
+    "diagonal": "对角构图", "centered": "居中构图", "symmetrical": "对称构图", "close-up": "近景", "closeup": "近景",
+    "happy": "欢快", "joyful": "欢快", "tense": "紧张", "calm": "平静", "playful": "俏皮", "dramatic": "戏剧感",
+    "ink": "墨线", "bold ink": "粗线墨稿", "flat color": "平涂色块", "texture": "纹理",
+    "fans": "爱好者", "sports fans": "运动爱好者", "general audience": "大众人群",
+    "political": "政治主题", "silhouette": "剪影人物", "abstract": "抽象", "geometric": "几何", "pattern": "图案", "nature": "自然", "technology": "科技", "travel": "旅行", "food": "食物", "seasonal": "季节主题",
+}
 
 
 @lru_cache(maxsize=2)
@@ -132,7 +148,21 @@ def normalise_creative_tags(value: Any) -> dict[str, list[str]]:
             raw_values = [raw_values]
         if not isinstance(raw_values, list):
             raw_values = []
-        tags[key] = [str(item).strip()[:120] for item in raw_values if str(item).strip()][:12]
+        cleaned = []
+        for item in raw_values:
+            text = str(item).strip().lower()
+            if not text:
+                continue
+            if any("\u4e00" <= char <= "\u9fff" for char in text):
+                label = "" if text.startswith("其他") else str(item).strip()
+            else:
+                label = _TAG_CANONICAL.get(text)
+                if label is None:
+                    matches = [mapped for source, mapped in _TAG_CANONICAL.items() if source in text]
+                    label = matches[0] if matches else ""
+            if label and label not in cleaned:
+                cleaned.append(label)
+        tags[key] = cleaned[:6]
     return tags
 
 
@@ -269,9 +299,13 @@ class TrendService:
 
     @contextmanager
     def _connect(self):
+        # WAL allows readers and writers to overlap, but a writer still needs a
+        # short opportunity to finish its transaction.  A one-second timeout
+        # made tagging and image analysis fail nondeterministically under load.
         db = sqlite3.connect(self.db_path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
+        db.execute("PRAGMA busy_timeout = 30000")
         try:
             with db:
                 yield db
@@ -280,6 +314,8 @@ class TrendService:
 
     def _init_db(self) -> None:
         with self._connect() as db:
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("PRAGMA synchronous = NORMAL")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS settings (
@@ -404,6 +440,9 @@ class TrendService:
                     raw_response TEXT NOT NULL DEFAULT '',
                     has_transparency INTEGER NOT NULL DEFAULT 0,
                     background_removed INTEGER NOT NULL DEFAULT 0,
+                    transparent_border_ratio REAL,
+                    transparent_pixel_ratio REAL,
+                    visible_pixel_ratio REAL,
                     visual_tags TEXT NOT NULL DEFAULT '{}',
                     ip_status TEXT NOT NULL DEFAULT 'pending',
                     ip_reasons TEXT NOT NULL DEFAULT '[]',
@@ -494,6 +533,13 @@ class TrendService:
                 db.execute("ALTER TABLE pattern_assets ADD COLUMN has_transparency INTEGER NOT NULL DEFAULT 0")
             if "background_removed" not in pattern_columns:
                 db.execute("ALTER TABLE pattern_assets ADD COLUMN background_removed INTEGER NOT NULL DEFAULT 0")
+            for name in (
+                "transparent_border_ratio",
+                "transparent_pixel_ratio",
+                "visible_pixel_ratio",
+            ):
+                if name not in pattern_columns:
+                    db.execute(f"ALTER TABLE pattern_assets ADD COLUMN {name} REAL")
             for name, definition in (
                 ("visual_tags", "TEXT NOT NULL DEFAULT '{}'"),
                 ("ip_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -980,14 +1026,19 @@ class TrendService:
 
     def tagging_state(self) -> dict[str, Any]:
         with self._connect() as db:
-            values = [row["creative_tags"] for row in db.execute("SELECT creative_tags FROM prompt_pool")]
-        total = len(values)
-        tagged = sum(bool(any(normalise_creative_tags(value).values())) for value in values)
+            total, tagged = db.execute(
+                """SELECT COUNT(*), COALESCE(SUM(
+                       CASE WHEN creative_tags LIKE '%\":[\"%'
+                                  OR creative_tags LIKE '%\": [\"%'
+                            THEN 1 ELSE 0 END
+                       ),0)
+                   FROM prompt_pool"""
+            ).fetchone()
         return {
             **self.tagging_backfill,
-            "total_prompts": total,
-            "tagged_prompts": tagged,
-            "pending_prompts": max(0, total - tagged),
+            "total_prompts": int(total),
+            "tagged_prompts": int(tagged),
+            "pending_prompts": max(0, int(total) - int(tagged)),
         }
 
     def launch_pattern_analysis_backfill(self, *, force: bool = False) -> bool:
@@ -1045,14 +1096,14 @@ class TrendService:
 
     @staticmethod
     def _pattern_analysis_prompt(asset: dict[str, Any]) -> str:
-        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. All tag values, risk reasons, detected references, and recommendations MUST be concise Simplified Chinese. Use arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Leave a key empty when not visually supported.
+        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. All tag values, risk reasons, detected references, and recommendations MUST be concise Simplified Chinese. Use arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Leave a key empty when not visually supported.
 
 Then perform an IP risk screen. This is not legal advice and must not claim legal clearance. Look for visible logos, brand marks, copyrighted characters, celebrity/public-figure likenesses, copied artwork signatures, readable protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Assign level low, medium, high, or unknown. Return reasons, detected_references, and a concise recommendation in Simplified Chinese.
 
 Context only: {asset['topic_zh']} / {asset['topic_en']}
 
 Schema:
-{{"visual_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"product":[],"audience":[],"risk_controls":[]}},"ip_risk":{{"level":"low","reasons":[],"detected_references":[],"recommendation":""}}}}"""
+{{"visual_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"audience":[],"risk_controls":[]}},"ip_risk":{{"level":"low","reasons":[],"detected_references":[],"recommendation":""}}}}"""
 
     @staticmethod
     def _pattern_analysis_image(path: Path) -> tuple[bytes, str]:
@@ -1852,13 +1903,13 @@ Schema:
             "pattern_prompt": item["pattern_prompt"],
             "product_prompt": item["prompt"],
         } for item in prompts]
-        return f"""Add structured creative tags to every supplied existing prompt pair. Do not rewrite prompts and do not invent a different event. Values must describe the concrete event-linked design. Return concise English arrays for exactly these keys: subject, action, setting, style, palette, composition, mood, texture, typography, product, audience, risk_controls. Subject values are open-ended living beings or objects. Product values may only be vehicle spare-tire cover or phone case. Preserve every prompt_id and return strict JSON only.
+        return f"""为每个已有提示词对补充结构化创意标签。不要改写提示词，也不要发明不同事件。标签值必须是简体中文、短词或短语，描述具体且与事件相关的设计；同义词合并，避免堆砌近义词。只使用这些键：subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls。不要输出 product 键。每个数组最多 3 个值；无法确认时留空。保留每个 prompt_id，严格返回 JSON。
 
 Prompt pairs:
 {json.dumps(compact, ensure_ascii=False)}
 
 Schema:
-{{"tags":[{{"prompt_id":"id","creative_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"product":[],"audience":[],"risk_controls":[]}}}}]}}"""
+{{"tags":[{{"prompt_id":"id","creative_tags":{{"subject":[],"action":[],"setting":[],"style":[],"palette":[],"composition":[],"mood":[],"texture":[],"typography":[],"audience":[],"risk_controls":[]}}}}]}}"""
 
     async def _tag_prompt_pool(self, run_id: str, config: dict[str, Any]) -> list[str]:
         with self._connect() as db:
@@ -1923,12 +1974,16 @@ Schema:
             prompts = [dict(row) for row in db.execute(
                 """SELECT t.*, p.id AS prompt_id, p.pattern_prompt
                    FROM prompt_pool p JOIN trends t ON t.id=p.trend_id
-                   WHERE p.run_id=? AND p.status='ready'""",
+                   WHERE p.run_id=? AND p.status='ready'
+                   ORDER BY CASE WHEN p.used_count=0 THEN 0 ELSE 1 END, RANDOM()""",
                 (run_id,),
             ).fetchall()]
         if not prompts:
             raise ValueError("提示词池为空，请先生成提示词池")
-        selected = random.sample(prompts, min(len(prompts), max(1, count or config["images_per_trend"])))
+        requested = max(1, count or config["images_per_trend"])
+        unused = [item for item in prompts if int(item.get("used_count") or 0) == 0]
+        pool = unused if len(unused) >= requested else unused + [item for item in prompts if item not in unused]
+        selected = random.sample(pool, min(len(pool), requested))
         self._update_run(run_id, status="running", stage="pattern_generation", error="")
         semaphore = asyncio.Semaphore(config["generation_concurrency"])
 
@@ -2079,15 +2134,29 @@ Schema:
         return output.getvalue(), has_transparency, background_removed
 
     @staticmethod
-    def _transparent_border_ratio(image_bytes: bytes) -> float:
+    def _transparency_metrics(image_bytes: bytes) -> dict[str, float]:
         with Image.open(BytesIO(image_bytes)) as opened:
             alpha = opened.convert("RGBA").getchannel("A")
         width, height = alpha.size
+        histogram = alpha.histogram()
+        total_pixels = max(1, width * height)
         border = [alpha.getpixel((x, 0)) for x in range(width)]
         border.extend(alpha.getpixel((x, height - 1)) for x in range(width))
         border.extend(alpha.getpixel((0, y)) for y in range(height))
         border.extend(alpha.getpixel((width - 1, y)) for y in range(height))
-        return sum(value <= 16 for value in border) / max(1, len(border))
+        return {
+            "border_ratio": sum(value <= 16 for value in border) / max(1, len(border)),
+            "transparent_ratio": sum(histogram[:17]) / total_pixels,
+            "visible_ratio": sum(histogram[17:]) / total_pixels,
+        }
+
+    @staticmethod
+    def _cutout_passes(metrics: dict[str, float]) -> bool:
+        return (
+            metrics["border_ratio"] >= 0.8
+            and metrics["transparent_ratio"] >= 0.05
+            and metrics["visible_ratio"] >= 0.01
+        )
 
     @staticmethod
     def _remove_background(image_bytes: bytes) -> bytes:
@@ -2134,18 +2203,25 @@ Schema:
         try:
             response_text, image_bytes, mime_type = await self._call_flow(prompt_text, model)
             png_bytes, has_transparency, background_removed = self._prepare_pattern_png(image_bytes)
-            if not has_transparency or self._transparent_border_ratio(png_bytes) < 0.8:
+            metrics = self._transparency_metrics(png_bytes)
+            if not has_transparency or not self._cutout_passes(metrics):
                 try:
                     extracted = self._remove_background(image_bytes)
                     png_bytes, has_transparency, _ = self._prepare_pattern_png(extracted)
                     background_removed = True
+                    metrics = self._transparency_metrics(png_bytes)
                     response_text = f"{response_text}\n[rembg-foreground-extraction]"
                 except Exception as exc:
                     raise RuntimeError(
                         "rembg前景提取失败；请确认u2netp.onnx已放入U2NET_HOME"
                     ) from exc
-            if not has_transparency:
-                raise RuntimeError("图案未形成真实透明通道，已拒绝保存；请重试生图")
+            if not has_transparency or not self._cutout_passes(metrics):
+                raise RuntimeError(
+                    "图案抠图质检未通过，已拒绝保存；"
+                    f"边缘透明{metrics['border_ratio']:.0%}，"
+                    f"画布透明{metrics['transparent_ratio']:.0%}，"
+                    f"有效前景{metrics['visible_ratio']:.0%}"
+                )
             relative = Path(run_id) / trend["id"] / f"pattern-{asset_id}.png"
             target = self.assets_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -2154,9 +2230,11 @@ Schema:
             with self._connect() as db:
                 db.execute(
                     """UPDATE pattern_assets SET status='success',image_path=?,mime_type=?,duration_ms=?,
-                       raw_response=?,has_transparency=?,background_removed=?,finished_at=? WHERE id=?""",
+                       raw_response=?,has_transparency=?,background_removed=?,transparent_border_ratio=?,
+                       transparent_pixel_ratio=?,visible_pixel_ratio=?,finished_at=? WHERE id=?""",
                     (relative.as_posix(), "image/png", duration, response_text[:20000],
-                     int(has_transparency), int(background_removed), utc_now(), asset_id),
+                     int(has_transparency), int(background_removed), metrics["border_ratio"],
+                     metrics["transparent_ratio"], metrics["visible_ratio"], utc_now(), asset_id),
                 )
                 db.execute("UPDATE trends SET status='pattern_generated' WHERE id=?", (trend["id"],))
             return asset_id
@@ -2330,13 +2408,25 @@ Schema:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": data_url}},
             ]
-        response = await self.http.post(
-            f"{self.flow_base_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {self.flow_api_key}"},
-            json={"model": model, "messages": [{"role": "user", "content": content}], "stream": False},
-            timeout=1800,
-        )
-        response.raise_for_status()
+        error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = await self.http.post(
+                    f"{self.flow_base_url}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.flow_api_key}"},
+                    json={"model": model, "messages": [{"role": "user", "content": content}], "stream": False},
+                    timeout=1800,
+                )
+                response.raise_for_status()
+                break
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
+                error = exc
+                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+                if attempt >= 3 or (status and status < 500 and status != 429):
+                    raise
+                await asyncio.sleep(3 * attempt)
+        else:
+            raise RuntimeError(f"Flow请求失败: {safe_error(error or RuntimeError('unknown'))}")
         raw = response.text
         content = str(response.json()["choices"][0]["message"].get("content", ""))
         match = re.search(r"!\[[^\]]*\]\((.+?)\)", content, flags=re.S)
@@ -2466,7 +2556,7 @@ Schema:
         ]
         return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Use these keys and return arrays of concise English values: subject (any living being or object, such as cat, dog, athlete, panda, satellite), action, setting, style, palette, composition, mood, texture, typography, product (only vehicle spare-tire cover or phone case), audience, risk_controls. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels: no full-canvas background, scenery extending to the image edges, sky, ground, wall, room, floor, horizon, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, cast shadow, or merchandising scene. Keep transparent negative space around and between design elements. If transparency is technically impossible, use only uniform pure white (#FFFFFF) outside the artwork, never a textured, colored, gradient, or illustrated background. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
+For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Tag values must be concise Simplified Chinese, merge synonyms, and use at most 3 values per key. Use only these keys: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels: no full-canvas background, scenery extending to the image edges, sky, ground, wall, room, floor, horizon, photographic environment, poster rectangle, colored backdrop, border, frame, product, mockup, hands, cast shadow, or merchandising scene. Keep transparent negative space around and between design elements. If transparency is technically impossible, use only uniform pure white (#FFFFFF) outside the artwork, never a textured, colored, gradient, or illustrated background. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
 
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
@@ -2481,7 +2571,7 @@ Pattern-pool entries:
 {json.dumps(compact, ensure_ascii=False)}
 
 Schema:
-{{"prompts":[{{"trend_id":"id","creative_tags":{{"subject":["generic athletes"],"action":["shoving"],"setting":["training field"],"style":["original editorial comic"],"palette":["navy","silver"],"composition":["dynamic diagonal"],"mood":["tense"],"texture":["bold ink"],"typography":[],"product":["phone case"],"audience":["football fans"],"risk_controls":["unbranded fictional figures"]}},"pattern_prompt":"standalone artwork prompt","product_prompt":"reference-image product rendering prompt"}}]}}"""
+{{"prompts":[{{"trend_id":"id","creative_tags":{{"subject":["泛化运动员"],"action":["对抗"],"setting":["训练场"],"style":["原创编辑插画"],"palette":["深蓝","银灰"],"composition":["对角构图"],"mood":["紧张"],"texture":["粗线墨稿"],"typography":[],"audience":["运动爱好者"],"risk_controls":["无品牌虚构人物"]}},"pattern_prompt":"standalone artwork prompt","product_prompt":"reference-image product rendering prompt"}}]}}"""
 
     @staticmethod
     def _normalise_candidates(
@@ -2680,7 +2770,6 @@ Requirements:
                           r.duration_ms,r.error,r.candidate_count,r.verified_count,
                           r.generated_count,r.failed_count,
                           (SELECT COUNT(*) FROM prompt_pool p WHERE p.run_id=r.id) AS prompt_count,
-                          (SELECT COUNT(*) FROM sellability_pool s WHERE s.run_id=r.id) AS sellability_count,
                           (SELECT COUNT(*) FROM pattern_assets a
                            WHERE a.run_id=r.id AND a.status='success') AS pattern_count
                    FROM runs r ORDER BY r.started_at DESC LIMIT ?""",
@@ -2823,30 +2912,6 @@ Requirements:
                 raise ValueError("未知卡片池")
         return {"entries": entries, "total": total}
 
-    @staticmethod
-    def _sellability_record(row: dict[str, Any], prefix: str = "") -> dict[str, Any] | None:
-        if row.get(f"{prefix}total_score") is None:
-            return None
-        result = {
-            "id": row.get(f"{prefix}id"),
-            "total_score": int(row[f"{prefix}total_score"]),
-            "grade": row[f"{prefix}grade"],
-            "pattern_quota": int(row[f"{prefix}pattern_quota"]),
-            "products_per_pattern": int(row[f"{prefix}products_per_pattern"]),
-        }
-        for key in ("metrics", "recommended_products", "risk_reasons"):
-            value = row.get(f"{prefix}{key}")
-            if value is not None:
-                try:
-                    result[key] = json.loads(value)
-                except (TypeError, json.JSONDecodeError):
-                    result[key] = []
-        for key in ("target_audience", "valid_window", "sales_reason", "risk_level", "created_at"):
-            value = row.get(f"{prefix}{key}")
-            if value is not None:
-                result[key] = value
-        return result
-
     def list_pool_cards(
         self,
         pool: str,
@@ -2854,35 +2919,21 @@ Requirements:
         offset: int = 0,
         *,
         q: str = "",
-        grade: str = "",
         category: str = "",
-        sort: str = "newest",
         transparent: str = "",
     ) -> dict[str, Any]:
         limit = min(100, max(1, limit))
         offset = max(0, offset)
         q = q.strip()[:200]
-        grade = grade.strip().upper()[:1]
         category = category.strip()[:100]
-        sort = sort if sort in {"newest", "score_desc", "score_asc"} else "newest"
-        if pool == "prompts" and not any((q, grade, category, transparent)) and sort == "newest":
+        if pool == "sellability":
+            raise ValueError("销售评分功能已移除")
+        if pool == "prompts" and not any((q, category, transparent)):
             return self._list_pool_cards_legacy(pool, limit, offset)
 
-        score_select = """s.id AS sell_id,s.total_score AS sell_total_score,
-            s.grade AS sell_grade,s.pattern_quota AS sell_pattern_quota,
-            s.products_per_pattern AS sell_products_per_pattern"""
         if pool == "acquire":
             all_entries = []
             with self._connect() as db:
-                scores: dict[tuple[str, str], dict[str, Any]] = {}
-                for score_row in db.execute(
-                    f"""SELECT s.run_id,s.candidate_id AS source_candidate_id,{score_select}
-                        FROM raw_sellability_pool s"""
-                ):
-                    record = self._sellability_record(dict(score_row), "sell_")
-                    key = (score_row["run_id"], score_row["source_candidate_id"])
-                    if record and (key not in scores or record["total_score"] > scores[key]["total_score"]):
-                        scores[key] = record
                 runs = db.execute(
                     """SELECT id,started_at,raw_discovery FROM runs
                        WHERE raw_discovery!='' ORDER BY started_at DESC"""
@@ -2893,52 +2944,35 @@ Requirements:
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
                 for item in items:
-                    item["sellability"] = scores.get((row["id"], item["candidate_id"]))
                     haystack = f"{item['topic_zh']} {item['topic_en']} {item['summary_zh']}".casefold()
                     if q and q.casefold() not in haystack:
                         continue
                     if category and item["category"] != category:
-                        continue
-                    if grade and (not item["sellability"] or item["sellability"]["grade"] != grade):
                         continue
                     all_entries.append({
                         "item": item,
                         "run": {"id": row["id"], "started_at": row["started_at"]},
                         "date": row["started_at"],
                     })
-            if sort.startswith("score"):
-                all_entries.sort(
-                    key=lambda entry: (entry["item"].get("sellability") or {}).get("total_score", -1),
-                    reverse=sort == "score_desc",
-                )
             return {"entries": all_entries[offset:offset + limit], "total": len(all_entries)}
 
         table_map = {
             "trends": ("trends t", "t.id", "t.created_at", "t.topic_zh", "t.category"),
             "patterns": ("pattern_assets a JOIN trends t ON t.id=a.trend_id", "a.id", "a.created_at", "t.topic_zh", "t.category"),
             "images": ("generations g JOIN trends t ON t.id=g.trend_id LEFT JOIN pattern_assets a ON a.id=g.pattern_asset_id", "g.id", "g.created_at", "t.topic_zh", "t.category"),
-            "sellability": ("raw_sellability_pool s", "s.id", "s.created_at", "s.topic_zh", "s.category"),
         }
         if pool not in table_map:
             return self._list_pool_cards_legacy(pool, limit, offset)
         table, _id_column, created_column, title_column, category_column = table_map[pool]
-        if pool != "sellability":
-            table += " LEFT JOIN sellability_pool s ON s.trend_id=t.id"
-            table += " JOIN runs r ON r.id=t.run_id"
-        else:
-            table += " JOIN runs r ON r.id=s.run_id"
+        table += " JOIN runs r ON r.id=t.run_id"
         where = []
         params: list[Any] = []
         if pool in {"patterns", "images"}:
             alias = "a" if pool == "patterns" else "g"
             where.append(f"{alias}.image_path IS NOT NULL")
         if q:
-            text_alias = "s" if pool == "sellability" else "t"
-            where.append(f"({title_column} LIKE ? OR {text_alias}.topic_en LIKE ? OR {text_alias}.summary_zh LIKE ?)")
+            where.append(f"({title_column} LIKE ? OR t.topic_en LIKE ? OR t.summary_zh LIKE ?)")
             params.extend([f"%{q}%"] * 3)
-        if grade:
-            where.append("s.grade=?")
-            params.append(grade)
         if category:
             where.append(f"{category_column}=?")
             params.append(category)
@@ -2946,19 +2980,13 @@ Requirements:
             where.append("a.has_transparency=?")
             params.append(1 if transparent == "yes" else 0)
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-        order_sql = {
-            "newest": f"{created_column} DESC",
-            "score_desc": "COALESCE(s.total_score,-1) DESC, " + created_column + " DESC",
-            "score_asc": "COALESCE(s.total_score,-1) ASC, " + created_column + " DESC",
-        }[sort]
-        if pool == "sellability":
-            select = "s.*,r.started_at AS run_started_at"
-        elif pool == "trends":
-            select = f"t.*,r.started_at AS run_started_at,{score_select}"
+        order_sql = f"{created_column} DESC"
+        if pool == "trends":
+            select = "t.*,r.started_at AS run_started_at"
         else:
             alias = "a" if pool == "patterns" else "g"
             analysis_select = "" if pool == "patterns" else ",a.visual_tags,a.ip_status,a.ip_reasons,a.ip_matches,a.ip_error,a.ip_checked_at"
-            select = f"{alias}.*,t.topic_zh,t.category,r.started_at AS run_started_at,{score_select}{analysis_select}"
+            select = f"{alias}.*,t.topic_zh,t.category,r.started_at AS run_started_at{analysis_select}"
         with self._connect() as db:
             total = int(db.execute(f"SELECT COUNT(*) FROM {table}{where_sql}", params).fetchone()[0])
             rows = db.execute(
@@ -2969,18 +2997,6 @@ Requirements:
         for source_row in rows:
             item = dict(source_row)
             run_started_at = item.pop("run_started_at")
-            if pool == "sellability":
-                for key in ("metrics", "recommended_products", "risk_reasons"):
-                    item[key] = json.loads(item[key])
-                trend = {key: item.pop(key) for key in ("topic_en", "topic_zh", "summary_zh", "category", "region")}
-                trend["source_candidate_id"] = item["candidate_id"]
-                entries.append({"item": item, "trend": trend, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
-                continue
-            sellability = self._sellability_record(item, "sell_")
-            for key in list(item):
-                if key.startswith("sell_"):
-                    item.pop(key)
-            item["sellability"] = sellability
             if pool == "trends":
                 for key in ("platforms", "evidence", "risk_flags"):
                     item[key] = json.loads(item[key])
@@ -3015,30 +3031,12 @@ Requirements:
                    JOIN trends t ON t.id=p.trend_id WHERE p.run_id=? ORDER BY p.created_at""",
                 (run_id,),
             ).fetchall()]
-            sellability_pool = [dict(row) for row in db.execute(
-                "SELECT * FROM sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
-                (run_id,),
-            ).fetchall()]
-            raw_sellability_pool = [dict(row) for row in db.execute(
-                  "SELECT * FROM raw_sellability_pool WHERE run_id=? ORDER BY total_score DESC,created_at DESC",
-                  (run_id,),
-              ).fetchall()]
         for item in prompt_pool:
             item["creative_tags"] = normalise_creative_tags(item.get("creative_tags"))
         for item in generations + pattern_assets:
             item["visual_tags"] = normalise_creative_tags(item.get("visual_tags"))
             for key in ("ip_reasons", "ip_matches"):
                 item[key] = json.loads(item.get(key) or "[]")
-        score_map = {}
-        for score in sellability_pool:
-            for key in ("metrics", "recommended_products", "risk_reasons"):
-                score[key] = json.loads(score[key])
-            score_map[score["trend_id"]] = score
-        raw_score_map = {}
-        for score in raw_sellability_pool:
-            for key in ("metrics", "recommended_products", "risk_reasons"):
-                score[key] = json.loads(score[key])
-            raw_score_map[score["candidate_id"]] = score
         generation_map: dict[str, list[dict[str, Any]]] = {}
         for generation in generations:
             if generation.get("image_path"):
@@ -3054,30 +3052,16 @@ Requirements:
                 trend[key] = json.loads(trend[key])
             trend["generations"] = generation_map.get(trend["id"], [])
             trend["pattern_assets"] = pattern_map.get(trend["id"], [])
-            trend["sellability"] = score_map.get(trend["id"])
         result = dict(run)
         result["trends"] = trends
         result["prompt_pool"] = prompt_pool
         result["pattern_assets"] = pattern_assets
-        result["sellability_pool"] = sellability_pool
-        result["raw_sellability_pool"] = raw_sellability_pool
         result["raw_trends"] = []
         if result.get("raw_discovery"):
             try:
                 result["raw_trends"] = self._normalise_candidates(
                     extract_json_object(result["raw_discovery"]), None
                 )
-                raw_scores: dict[str, dict[str, Any]] = dict(raw_score_map)
-                for trend in trends:
-                    source_id = trend.get("source_candidate_id")
-                    score = trend.get("sellability")
-                    if source_id and score and (
-                        source_id not in raw_scores
-                        or score["total_score"] > raw_scores[source_id]["total_score"]
-                    ):
-                        raw_scores[source_id] = score
-                for raw in result["raw_trends"]:
-                    raw["sellability"] = raw_scores.get(raw["candidate_id"])
             except (TypeError, ValueError, json.JSONDecodeError):
                 logger.warning("Run %s contains an unreadable raw discovery response", run_id)
         return result
@@ -3161,10 +3145,12 @@ Requirements:
                 (today,),
             ).fetchone()
             platforms = db.execute(
-                """SELECT p.value AS name, COUNT(*) AS count
-                   FROM trends AS t, json_each(t.platforms) AS p
+                """SELECT platform.value AS name, COUNT(*) AS count
+                   FROM trends t, json_each(t.platforms) AS platform
                    WHERE t.status!='rejected'
-                   GROUP BY p.value ORDER BY count DESC,name"""
+                   GROUP BY platform.value
+                   ORDER BY count DESC
+                   LIMIT 8"""
             ).fetchall()
             source_total = db.execute("SELECT COUNT(*) FROM source_entries").fetchone()[0]
             source_recent = db.execute(

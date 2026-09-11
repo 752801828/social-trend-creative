@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from app.service import FLOW_MODELS, GEMINI_MODELS, TrendService, utc_now
@@ -41,6 +43,17 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Social Trend Creative", version="0.1.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+@app.middleware("http")
+async def cache_static_assets(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/assets/") and response.status_code == 200:
+        response.headers.setdefault("Cache-Control", "public, max-age=86400, immutable")
+    return response
+
+
 app.mount("/assets", StaticFiles(directory=service.assets_dir), name="assets")
 
 
@@ -81,7 +94,6 @@ async def index():
 @app.get("/sources")
 @app.get("/signals")
 @app.get("/trends")
-@app.get("/sellability")
 @app.get("/prompts")
 @app.get("/patterns")
 @app.get("/images")
@@ -96,17 +108,53 @@ async def health():
 
 @app.get("/api/state")
 def state(limit: int = Query(default=40, ge=1, le=200)):
-    runs = service.list_runs(limit)
+    def safe(fn, fallback):
+        try:
+            return fn()
+        except sqlite3.OperationalError:
+            return fallback
+
+    dashboard_fallback = {
+        "active_run_id": service.active_run_id,
+        "running": bool(service.active_task and not service.active_task.done()),
+        "today": {"runs": 0, "verified": 0, "generated": 0},
+        "history": {"runs": 0, "candidates": 0, "verified": 0, "generated": 0, "failed": 0, "avg_duration_ms": 0},
+        "platforms": [], "sources": {"total_entries": 0, "recent_entries": 0},
+    }
+    tagging_fallback = {
+        "status": service.tagging_backfill.get("status", "idle"),
+        "total_runs": service.tagging_backfill.get("total_runs", 0),
+        "completed_runs": service.tagging_backfill.get("completed_runs", 0),
+        "current_run_id": service.tagging_backfill.get("current_run_id", ""),
+        "error": service.tagging_backfill.get("error", ""),
+        "updated_at": service.tagging_backfill.get("updated_at", ""),
+        "total_prompts": 0,
+        "tagged_prompts": 0,
+        "pending_prompts": 0,
+    }
+    pattern_analysis_fallback = {
+        "status": service.pattern_analysis_backfill.get("status", "idle"),
+        "total_assets": service.pattern_analysis_backfill.get("total_assets", 0),
+        "completed_assets": service.pattern_analysis_backfill.get("completed_assets", 0),
+        "current_asset_id": service.pattern_analysis_backfill.get("current_asset_id", ""),
+        "error": service.pattern_analysis_backfill.get("error", ""),
+        "updated_at": service.pattern_analysis_backfill.get("updated_at", ""),
+        "tagged_assets": 0,
+        "screened_assets": 0,
+        "pending_assets": 0,
+    }
     return {
-        "config": service.get_config(),
-        "connections": service.connection_info(),
+        "config": safe(service.get_config, {}),
+        "connections": safe(service.connection_info, {}),
         "models": {"gemini": GEMINI_MODELS, "flow": FLOW_MODELS},
-        "dashboard": service.dashboard(),
-        "runs": runs,
-        "sellability": service.sellability_state(),
-        "tagging": service.tagging_state(),
-        "pattern_analysis": service.pattern_analysis_state(),
-        "source_state": service.source_state(),
+        "dashboard": safe(service.dashboard, dashboard_fallback),
+        "runs": safe(lambda: service.list_runs(limit), []),
+        "tagging": safe(service.tagging_state, tagging_fallback),
+        "pattern_analysis": safe(service.pattern_analysis_state, pattern_analysis_fallback),
+        "source_state": safe(
+            service.source_state,
+            {"syncing": False, "sync": {}, "sources": [], "total_entries": 0, "recent_entries": 0},
+        ),
         "update": read_update_status(),
     }
 
@@ -145,15 +193,12 @@ def pool_cards(
     limit: int = Query(default=24, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     q: str = Query(default="", max_length=200),
-    grade: str = Query(default="", max_length=1),
     category: str = Query(default="", max_length=100),
-    sort: str = Query(default="newest", max_length=20),
     transparent: str = Query(default="", max_length=3),
 ):
     try:
         return service.list_pool_cards(
-            pool, limit, offset, q=q, grade=grade, category=category,
-            sort=sort, transparent=transparent,
+            pool, limit, offset, q=q, category=category, transparent=transparent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -275,28 +320,6 @@ async def backfill_tags():
 async def backfill_pattern_analysis(force: bool = Query(default=False)):
     try:
         launched = service.launch_pattern_analysis_backfill(force=force)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not launched:
-        raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"status": "accepted"}
-
-
-@app.post("/api/runs/{run_id}/sellability", status_code=202)
-async def score_sellability(run_id: str):
-    try:
-        launched = service.launch_sellability_scoring(run_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not launched:
-        raise HTTPException(status_code=409, detail="已有任务正在执行")
-    return {"run_id": run_id, "status": "accepted"}
-
-
-@app.post("/api/sellability/backfill", status_code=202)
-async def backfill_sellability():
-    try:
-        launched = service.launch_sellability_backfill()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:

@@ -106,8 +106,8 @@ class TrendServiceTests(unittest.TestCase):
 
     def test_creative_tags_are_open_ended_but_structured(self):
         tags = normalise_creative_tags({"subject": ["cat", "panda"], "action": "jumping", "unknown": ["ignored"]})
-        self.assertEqual(tags["subject"], ["cat", "panda"])
-        self.assertEqual(tags["action"], ["jumping"])
+        self.assertEqual(tags["subject"], ["猫", "熊猫"])
+        self.assertEqual(tags["action"], ["跳跃"])
         self.assertEqual(set(tags), set(CREATIVE_TAG_KEYS))
         self.assertNotIn("unknown", tags)
         with self.service._connect() as db:
@@ -142,7 +142,7 @@ class TrendServiceTests(unittest.TestCase):
         prompt = self.service.get_run(run_id)["prompt_pool"][0]
         self.assertEqual(prompt["pattern_prompt"], "ORIGINAL PATTERN")
         self.assertEqual(prompt["prompt"], "ORIGINAL PRODUCT")
-        self.assertEqual(prompt["creative_tags"]["subject"], ["cat"])
+        self.assertEqual(prompt["creative_tags"]["subject"], ["猫"])
 
     def test_tagging_stage_restores_existing_run_status(self):
         run_id = self.service.create_run("manual")
@@ -379,7 +379,7 @@ class TrendServiceTests(unittest.TestCase):
         self.assertEqual(len(run["prompt_pool"]), 2)
         self.assertTrue(all(item["used_count"] == 0 for item in run["prompt_pool"]))
         self.assertTrue(all(item["pattern_prompt"].startswith("Pattern for") for item in run["prompt_pool"]))
-        self.assertTrue(all(item["creative_tags"]["subject"] == ["cat"] for item in run["prompt_pool"]))
+        self.assertTrue(all(item["creative_tags"]["subject"] == ["猫"] for item in run["prompt_pool"]))
         self.assertEqual(runs[0]["prompt_count"], 2)
         self.assertEqual(self.service.list_pool_cards("acquire", 1, 0)["total"], 2)
         self.assertEqual(len(self.service.list_pool_cards("acquire", 1, 0)["entries"]), 1)
@@ -490,13 +490,17 @@ class TrendServiceTests(unittest.TestCase):
         async def exercise():
             calls = []
             source = BytesIO()
-            Image.new("RGB", (64, 64), "white").save(source, format="JPEG")
+            pattern = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            for x in range(20, 44):
+                for y in range(20, 44):
+                    pattern.putpixel((x, y), (220, 30, 50, 255))
+            pattern.save(source, format="PNG")
             product = BytesIO()
             Image.new("RGB", (64, 64), "blue").save(product, format="PNG")
 
             async def fake_flow(prompt, _model, reference_image=None):
                 calls.append((prompt, reference_image))
-                return "ok", source.getvalue() if reference_image is None else product.getvalue(), "image/jpeg" if reference_image is None else "image/png"
+                return "ok", source.getvalue() if reference_image is None else product.getvalue(), "image/png"
 
             self.service._call_flow = fake_flow
             await self.service._generate_from_prompt_pool(run_id, self.service.get_config(), 1)
@@ -543,6 +547,11 @@ class TrendServiceTests(unittest.TestCase):
             self.assertEqual(output.mode, "RGBA")
             self.assertEqual(output.getpixel((0, 0))[3], 0)
             self.assertGreater(output.getpixel((40, 40))[3], 240)
+        metrics = self.service._transparency_metrics(payload)
+        self.assertTrue(self.service._cutout_passes(metrics))
+        self.assertGreaterEqual(metrics["border_ratio"], 0.8)
+        self.assertGreaterEqual(metrics["transparent_ratio"], 0.05)
+        self.assertGreaterEqual(metrics["visible_ratio"], 0.01)
 
     def test_fake_checkerboard_transparency_is_sent_to_rembg(self):
         source = Image.new("RGB", (96, 96))
@@ -556,7 +565,21 @@ class TrendServiceTests(unittest.TestCase):
         payload, transparent, _removed = self.service._prepare_pattern_png(buffer.getvalue())
 
         self.assertTrue(transparent)
-        self.assertLess(self.service._transparent_border_ratio(payload), 0.8)
+        metrics = self.service._transparency_metrics(payload)
+        self.assertLess(metrics["border_ratio"], 0.8)
+        self.assertFalse(self.service._cutout_passes(metrics))
+
+    def test_fully_transparent_pattern_fails_cutout_quality_check(self):
+        source = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+        buffer = BytesIO()
+        source.save(buffer, format="PNG")
+
+        metrics = self.service._transparency_metrics(buffer.getvalue())
+
+        self.assertEqual(metrics["border_ratio"], 1.0)
+        self.assertEqual(metrics["transparent_ratio"], 1.0)
+        self.assertEqual(metrics["visible_ratio"], 0.0)
+        self.assertFalse(self.service._cutout_passes(metrics))
 
     def test_sellability_score_is_server_computed_and_controls_quota(self):
         raw = {
@@ -578,68 +601,9 @@ class TrendServiceTests(unittest.TestCase):
         self.assertLess(low["total_score"], 60)
         self.assertEqual((low["grade"], low["pattern_quota"], low["products_per_pattern"]), ("D", 1, 1))
 
-    def test_sellability_pool_supports_score_sorting_and_grade_filter(self):
-        run_id = self.service.create_run("manual")
-        score = self.service._normalise_sellability_item({
-            "metrics": {
-                key: {"score": maximum, "judgement": "strong"}
-                for key, _label, maximum in SELLABILITY_METRICS
-            },
-            "recommended_products": ["mug", "phone case"],
-        })
-        with self.service._connect() as db:
-            db.execute(
-                """INSERT INTO raw_sellability_pool
-                   (id,run_id,candidate_id,topic_en,topic_zh,summary_zh,category,region,
-                    total_score,grade,metrics,target_audience,recommended_products,valid_window,
-                    sales_reason,risk_level,risk_reasons,pattern_quota,products_per_pattern,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("score-1", run_id, "candidate-1", "Sellable trend", "可卖热点", "summary",
-                 "sports", "US", score["total_score"], score["grade"],
-                 json.dumps(score["metrics"]), "fans", json.dumps(score["recommended_products"]),
-                 "now", "reason", "low", "[]", score["pattern_quota"],
-                 score["products_per_pattern"], utc_now()),
-            )
-        result = self.service.list_pool_cards("sellability", grade="A", sort="score_desc")
-        self.assertEqual(result["total"], 1)
-        self.assertEqual(result["entries"][0]["item"]["total_score"], 100)
-        self.assertEqual(result["entries"][0]["item"]["recommended_products"], ["phone case"])
-
-    def test_sellability_backfill_scores_old_runs_and_preserves_terminal_status(self):
-        run_id = self.service.create_run("manual")
-        raw = {"trends": [{"topic_en": "Old trend", "topic_zh": "旧热点", "evidence": []}]}
-        self.service._update_run(
-            run_id, raw_discovery=json.dumps(raw), candidate_count=1,
-            status="completed", stage="finished", finished_at=utc_now(),
-        )
-
-        async def exercise():
-            async def fake_gemini(prompt, _model, *, attempts):
-                self.assertIn("candidate-1", prompt)
-                return json.dumps({"scores": [{
-                    "trend_id": "candidate-1",
-                    "metrics": {
-                        key: {"score": maximum, "judgement": "strong"}
-                        for key, _label, maximum in SELLABILITY_METRICS
-                    },
-                }]})
-
-            self.service._call_gemini = fake_gemini
-            await self.service._backfill_sellability([run_id])
-
-        asyncio.run(exercise())
-        run = self.service.get_run(run_id)
-        self.assertEqual(run["status"], "completed")
-        self.assertEqual(run["raw_sellability_pool"][0]["total_score"], 100)
-        progress = self.service.sellability_state()
-        self.assertEqual(progress["status"], "succeeded")
-        self.assertEqual(progress["completed_runs"], 1)
-        self.assertEqual(progress["scored_directions"], 1)
-        self.assertEqual(progress["pending_directions"], 0)
-        acquire = self.service.list_pool_cards("acquire")
-        self.assertEqual(acquire["entries"][0]["item"]["sellability"]["total_score"], 100)
-        candidates = self.service.list_pool_cards("sellability")
-        self.assertEqual(candidates["entries"][0]["trend"]["topic_zh"], "旧热点")
+    def test_sellability_pool_is_not_public(self):
+        with self.assertRaisesRegex(ValueError, "销售评分功能已移除"):
+            self.service.list_pool_cards("sellability")
 
     def test_startup_repairs_zero_candidate_count_for_old_raw_runs(self):
         run_id = self.service.create_run("manual")
@@ -654,39 +618,8 @@ class TrendServiceTests(unittest.TestCase):
         try:
             run = next(item for item in repaired.list_runs() if item["id"] == run_id)
             self.assertEqual(run["candidate_count"], 2)
-            self.assertEqual(repaired.sellability_state()["total_directions"], 2)
         finally:
             asyncio.run(repaired.http.aclose())
-
-    def test_raw_sellability_is_copied_to_classified_direction_quota(self):
-        run_id = self.service.create_run("manual")
-        score = self.service._normalise_sellability_item({
-            "metrics": {
-                key: {"score": maximum, "judgement": "strong"}
-                for key, _label, maximum in SELLABILITY_METRICS
-            }
-        })
-        with self.service._connect() as db:
-            db.execute(
-                """INSERT INTO raw_sellability_pool
-                   (id,run_id,candidate_id,topic_en,topic_zh,summary_zh,category,region,
-                    total_score,grade,metrics,target_audience,recommended_products,valid_window,
-                    sales_reason,risk_level,risk_reasons,pattern_quota,products_per_pattern,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("raw-score", run_id, "candidate-1", "Topic", "热点", "summary", "sports", "US",
-                 100, "A", json.dumps(score["metrics"]), "fans", '["T-shirt"]', "now",
-                 "reason", "low", "[]", 3, 2, utc_now()),
-            )
-        trend = self._candidate("candidate-1", "Direction", "", None)
-        trend.pop("candidate_id")
-        trend.update({
-            "id": "trend-linked", "source_candidate_id": "candidate-1",
-            "status": "ready", "verification_note": "linked",
-        })
-        self.service._replace_trends(run_id, [trend])
-        self.service._copy_raw_sellability_to_trends(run_id)
-        linked = self.service.get_run(run_id)["trends"][0]["sellability"]
-        self.assertEqual((linked["grade"], linked["pattern_quota"], linked["products_per_pattern"]), ("A", 3, 2))
 
     def test_generation_schedule_runs_without_acquisition_schedule(self):
         run_id = self.service.create_run("manual")
@@ -911,7 +844,7 @@ class TrendServiceTests(unittest.TestCase):
 
         asyncio.run(exercise())
         asset = self.service.get_run(run_id)["pattern_assets"][0]
-        self.assertEqual(asset["visual_tags"]["subject"], ["cat"])
+        self.assertEqual(asset["visual_tags"]["subject"], ["猫"])
         self.assertEqual(asset["ip_status"], "medium")
         self.assertIn("redraw without emblem", asset["ip_reasons"])
 
@@ -1019,8 +952,9 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("③ 补齐全部提示词", self.html)
         self.assertIn("④ 随机生成图案", self.html)
         self.assertIn("⑤ 生成产品图", self.html)
-        self.assertIn("建立可用图案、销售候选和提示词池", self.html)
-        self.assertIn('"sellability"', main)
+        self.assertIn("建立可用图案和提示词池", self.html)
+        self.assertNotIn('@app.get("/sellability")', main)
+        self.assertNotIn('/api/sellability/backfill', main)
         self.assertIn('"stages": ["acquisition", "classification", "prompt_pool"]', main)
         self.assertIn('launch_full_pipeline(trigger_type="manual", auto_generate=False)', main)
         self.assertIn("热点来源平台", self.html)
@@ -1032,7 +966,6 @@ class StaticPageTests(unittest.TestCase):
         for path, label in (
             ("/acquire", "全部热点"),
             ("/trends", "可用图案"),
-            ("/sellability", "销售候选"),
             ("/prompts", "生成提示词"),
             ("/patterns", "图案图库"),
             ("/images", "产品图库"),
@@ -1093,10 +1026,10 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("cardAttrs(run,'prompt',item.id)", self.html)
         self.assertIn("cardAttrs(run,'pattern',item.id)", self.html)
         self.assertIn("cardAttrs(run,'image',item.id)", self.html)
-        self.assertIn("cardAttrs(run,'sellability',item.id)", self.html)
+        self.assertNotIn("cardAttrs(run,'sellability',item.id)", self.html)
         self.assertIn("selectedContent", self.html)
         self.assertIn("renderRawDetail", self.html)
-        self.assertIn("点击卡片查看对应内容", self.html)
+        self.assertIn("当前筛选下没有内容", self.html)
 
     def test_apple_style_is_applied(self):
         self.assertIn("Apple 风格", (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"))
@@ -1126,57 +1059,23 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn("tagsHtml", self.html)
         self.assertIn("tagLabels", self.html)
 
-    def test_sellability_filters_and_transparent_png_download_are_exposed(self):
+    def test_sellability_ui_is_removed_and_cutout_status_is_exposed(self):
         main = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
         requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
-        self.assertIn("grade: str = Query", main)
         self.assertIn("transparent: str = Query", main)
         self.assertIn("poolPageUrl", self.html)
-        self.assertIn("可卖分高到低", self.html)
-        self.assertIn("全部等级", self.html)
         self.assertIn("透明 PNG", self.html)
         self.assertIn('id="imageDownload"', self.html)
         self.assertIn("download=", self.html)
         self.assertIn("Pillow", requirements)
         self.assertIn("rembg[cpu]", requirements)
-        self.assertIn("/api/sellability/backfill", self.html)
-        self.assertIn("补算历史评分", self.html)
-        self.assertIn("评分进度：", self.html)
-        self.assertIn("scored_directions", self.html)
-        self.assertIn('"sellability": service.sellability_state()', main)
-        self.assertIn("查看评分规则与生图配额", self.html)
-        for rule in (
-            "购买意图 <b>25分", "社媒商业热度 <b>20分",
-            "搜索增长潜力 <b>15分", "商品适配度 <b>15分",
-            "受众清晰度 <b>10分", "销售窗口寿命 <b>10分",
-            "竞争机会 <b>5分", "A · 80–100：3图案 × 2产品",
-            "D · 0–59：1图案 × 1产品", "不采用模型自报总分",
-        ):
-            self.assertIn(rule, self.html)
-        self.assertIn('class="score-rules"', self.html)
-        for reason in (
-            "身份表达、纪念、赠礼或即时购买动机",
-            "多来源覆盖、讨论速度和互动信号",
-            "关键词可识别性和后续发酵空间",
-            "适配杯子、服装、手机壳等载体",
-            "选品、广告定向和商品文案",
-            "一日新闻、阶段性话题、周期事件还是常青兴趣",
-            "未接入真实平台竞品数据",
-            "每项必须给出该热点的具体评分理由",
-        ):
-            self.assertIn(reason, self.html)
-        for judgement in (
-            "身份表达、纪念、赠礼或即时购买动机",
-            "多来源覆盖、讨论速度和互动信号",
-            "事件新鲜度、关键词可识别性和后续发酵空间",
-            "是否醒目、易印刷并适配杯子、服装、手机壳",
-            "兴趣人群、社群和使用场景是否具体",
-            "一日新闻、阶段性话题、周期事件还是常青兴趣",
-            "是否过度饱和以及能否形成差异",
-            "每项必须给出该热点的具体评分理由",
-        ):
-            self.assertIn(judgement, self.html)
-        self.assertIn('id="sellabilityRules"', self.html)
+        self.assertIn("cutoutInfo", self.html)
+        self.assertIn("边缘透明", self.html)
+        self.assertIn("有效前景", self.html)
+        for removed in ("销售候选", "可卖分", "补算历史评分", "score-rules", "sellability"):
+            self.assertNotIn(removed, self.html)
+        self.assertNotIn('grade: str = Query', main)
+        self.assertNotIn('"sellability": service.sellability_state()', main)
         self.assertIn("REMBG_MODEL=u2netp", (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"))
 
     def test_acquisition_and_generation_have_separate_schedule_controls(self):
