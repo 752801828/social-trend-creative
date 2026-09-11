@@ -187,7 +187,7 @@ class TrendServiceTests(unittest.TestCase):
         html = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
         self.assertIn('/api/runs/{run_id}/tags', main)
         self.assertIn("launch_tagging", main)
-        self.assertIn("单独打标签", html)
+        self.assertIn("给提示词打标签", html)
         self.assertIn("runStage('tags')", html)
         self.assertIn("/api/patterns/analyze/backfill", main)
         self.assertIn("分析全部图案", html)
