@@ -189,17 +189,20 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("launch_tagging", main)
         self.assertNotIn("给提示词打标签", html)
         self.assertNotIn("runStage('tags')", html)
-        self.assertIn("/api/patterns/analyze/backfill", main)
-        self.assertIn("/api/patterns/{asset_id}/analyze", main)
+        self.assertIn("/api/patterns/tags/backfill", main)
+        self.assertIn("/api/patterns/ip/backfill", main)
+        self.assertIn("/api/patterns/{asset_id}/tag", main)
+        self.assertIn("/api/patterns/{asset_id}/ip", main)
         self.assertIn("/api/patterns/{asset_id}/regenerate", main)
-        self.assertIn("分析全部图案", html)
-        self.assertIn("单图分析标签/IP", html)
-        self.assertIn("analyzePatternAsset", html)
+        self.assertIn("获取未打标签图案", html)
+        self.assertIn("获取未做IP筛查图案", html)
+        self.assertIn("获取视觉标签", html)
+        self.assertIn("获取IP筛查", html)
+        self.assertIn("analyzePatternPart", html)
         self.assertIn("regeneratePatternWithTag", html)
         self.assertIn("图案标签，如 主体:猫", html)
         self.assertIn("ip_status", html)
-        self.assertIn("force=true", html)
-        self.assertIn("停止图案分析", html)
+        self.assertIn("停止图案任务", html)
         self.assertIn("当前任务", html)
         self.assertIn("currentTaskInfo", html)
         self.assertIn("openCurrentTask", html)
@@ -901,6 +904,28 @@ class TrendServiceTests(unittest.TestCase):
 
         asyncio.run(exercise())
         self.service._analyze_pattern_asset.assert_awaited_once_with("asset-1")
+
+    def test_pattern_part_backfills_only_unprocessed_assets(self):
+        run_id = self.service.create_run("manual")
+        trend = self._candidate("candidate-1", "Trend", "", None)
+        trend.pop("candidate_id")
+        trend.update({"id": "trend-1", "status": "ready", "verification_note": "ready"})
+        self.service._replace_trends(run_id, [trend])
+        with self.service._connect() as db:
+            for asset_id, tags, ip_status in [
+                ("untagged", "{}", "low"),
+                ("tagged", '{"subject":["猫"]}', "pending"),
+                ("screened", "{}", "medium"),
+                ("ip-error", '{"subject":["猫"]}', "error"),
+            ]:
+                db.execute(
+                    """INSERT INTO pattern_assets
+                       (id,run_id,trend_id,sequence,model,prompt,status,image_path,visual_tags,ip_status,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (asset_id, run_id, "trend-1", 1, "model", "prompt", "success", f"{asset_id}.png", tags, ip_status, utc_now()),
+                )
+        self.assertEqual(self.service._pattern_part_assets("tags"), ["untagged", "screened"])
+        self.assertEqual(self.service._pattern_part_assets("ip"), ["tagged", "ip-error"])
 
     def test_cancelled_generation_restores_selectable_trend_status(self):
         run_id = self.service.create_run("manual")

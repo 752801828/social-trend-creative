@@ -287,6 +287,14 @@ class TrendService:
             "status": "idle", "total_assets": 0, "completed_assets": 0,
             "current_asset_id": "", "run_id": "", "error": "", "updated_at": utc_now(),
         }
+        self.pattern_tagging_backfill = {
+            "status": "idle", "total_assets": 0, "completed_assets": 0,
+            "current_asset_id": "", "run_id": "pattern-tags", "error": "", "updated_at": utc_now(),
+        }
+        self.pattern_ip_backfill = {
+            "status": "idle", "total_assets": 0, "completed_assets": 0,
+            "current_asset_id": "", "run_id": "pattern-ip", "error": "", "updated_at": utc_now(),
+        }
         self.source_sync_task: asyncio.Task | None = None
         self.source_sync_lock = asyncio.Lock()
         self.scheduler_task: asyncio.Task | None = None
@@ -1048,6 +1056,92 @@ class TrendService:
             "pending_prompts": max(0, int(total) - int(tagged)),
         }
 
+    def _pattern_part_assets(self, part: str) -> list[str]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id,visual_tags,ip_status FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL ORDER BY created_at"
+            ).fetchall()
+        if part == "tags":
+            return [row["id"] for row in rows if not any(normalise_creative_tags(row["visual_tags"]).values())]
+        return [row["id"] for row in rows if row["ip_status"] in {"pending", "error", ""}]
+
+    def launch_pattern_part_backfill(self, part: str) -> bool:
+        if part not in {"tags", "ip"}:
+            raise ValueError("未知图案分析类型")
+        if self.active_task and not self.active_task.done():
+            return False
+        asset_ids = self._pattern_part_assets(part)
+        if not asset_ids:
+            raise ValueError("没有尚未处理的图案")
+        tracker = self.pattern_tagging_backfill if part == "tags" else self.pattern_ip_backfill
+        tracker.update({"status": "pending", "total_assets": len(asset_ids), "completed_assets": 0,
+                        "current_asset_id": asset_ids[0], "error": "", "updated_at": utc_now()})
+        run_id = "pattern-tags" if part == "tags" else "pattern-ip"
+        return self._launch(run_id, self._backfill_pattern_part(asset_ids, part), run_id)
+
+    def launch_pattern_part(self, asset_id: str, part: str) -> bool:
+        if part not in {"tags", "ip"}:
+            raise ValueError("未知图案分析类型")
+        if self.active_task and not self.active_task.done():
+            return False
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,run_id,status,image_path,visual_tags,ip_status FROM pattern_assets WHERE id=?", (asset_id,)
+            ).fetchone()
+        if not row or row["status"] != "success" or not row["image_path"]:
+            raise ValueError("该图案尚未生成成功，暂不能分析")
+        if part == "tags" and any(normalise_creative_tags(row["visual_tags"]).values()):
+            raise ValueError("该图案已经有视觉标签")
+        if part == "ip" and row["ip_status"] not in {"pending", "error", ""}:
+            raise ValueError("该图案已经完成侵权筛查")
+        tracker = self.pattern_tagging_backfill if part == "tags" else self.pattern_ip_backfill
+        tracker.update({"status": "pending", "total_assets": 1, "completed_assets": 0,
+                        "current_asset_id": asset_id, "error": "", "updated_at": utc_now()})
+        run_id = "pattern-tags" if part == "tags" else "pattern-ip"
+        return self._launch(run_id, self._analyze_one_pattern_part(asset_id, part), f"{run_id}-one")
+
+    async def _analyze_one_pattern_part(self, asset_id: str, part: str) -> None:
+        tracker = self.pattern_tagging_backfill if part == "tags" else self.pattern_ip_backfill
+        try:
+            async with self.operation_lock:
+                tracker.update({"status": "running", "updated_at": utc_now()})
+                if part == "tags":
+                    await self._analyze_pattern_tags_asset(asset_id)
+                else:
+                    await self._screen_pattern_ip_asset(asset_id)
+                tracker.update({"status": "succeeded", "completed_assets": 1, "current_asset_id": "", "updated_at": utc_now()})
+        except asyncio.CancelledError:
+            tracker.update({"status": "cancelled", "current_asset_id": "", "updated_at": utc_now()})
+            raise
+        except Exception as exc:
+            tracker.update({"status": "failed", "error": safe_error(exc), "current_asset_id": "", "updated_at": utc_now()})
+        finally:
+            self.active_run_id = None
+
+    async def _backfill_pattern_part(self, asset_ids: list[str], part: str) -> None:
+        tracker = self.pattern_tagging_backfill if part == "tags" else self.pattern_ip_backfill
+        errors: list[str] = []
+        try:
+            async with self.operation_lock:
+                tracker.update({"status": "running", "updated_at": utc_now()})
+                for index, asset_id in enumerate(asset_ids, 1):
+                    tracker.update({"current_asset_id": asset_id, "updated_at": utc_now()})
+                    try:
+                        if part == "tags":
+                            await self._analyze_pattern_tags_asset(asset_id)
+                        else:
+                            await self._screen_pattern_ip_asset(asset_id)
+                    except Exception as exc:
+                        errors.append(f"{asset_id}: {safe_error(exc)}")
+                    tracker.update({"completed_assets": index, "updated_at": utc_now()})
+                tracker.update({"status": "failed" if errors else "succeeded", "error": "; ".join(errors)[:1000],
+                                "current_asset_id": "", "updated_at": utc_now()})
+        except asyncio.CancelledError:
+            tracker.update({"status": "cancelled", "current_asset_id": "", "updated_at": utc_now()})
+            raise
+        finally:
+            self.active_run_id = None
+
     def launch_pattern_analysis_backfill(self, *, force: bool = False) -> bool:
         if self.active_task and not self.active_task.done():
             return False
@@ -1169,6 +1263,52 @@ Schema:
         output = BytesIO()
         image.save(output, format="PNG", optimize=True)
         return output.getvalue(), "image/png"
+
+    async def _analyze_pattern_tags_asset(self, asset_id: str) -> None:
+        asset = self._get_pattern_asset_context(asset_id)
+        response = await self._call_gemini(
+            f"Inspect this generated artwork and return strict JSON only. Describe only visible pixels using concise Simplified Chinese arrays for these keys: {', '.join(CREATIVE_TAG_KEYS)}. Do not assess copyright or provide risk analysis. Context: {asset['topic_zh']} / {asset['topic_en']}. Schema: {{\"visual_tags\":{{\"subject\":[],\"action\":[],\"setting\":[],\"style\":[],\"palette\":[],\"composition\":[],\"mood\":[],\"texture\":[],\"typography\":[],\"audience\":[],\"risk_controls\":[]}}}}",
+            self.get_config()["gemini_verification_model"], attempts=2,
+            reference_image=self._pattern_analysis_image(asset["path"]),
+        )
+        payload = extract_json_object(response)
+        with self._connect() as db:
+            db.execute("UPDATE pattern_assets SET visual_tags=? WHERE id=?",
+                       (json_text(normalise_creative_tags(payload.get("visual_tags"))), asset_id))
+
+    async def _screen_pattern_ip_asset(self, asset_id: str) -> None:
+        asset = self._get_pattern_asset_context(asset_id)
+        response = await self._call_gemini(
+            f"Inspect this generated artwork for visible intellectual-property risk. Return strict JSON only. Do not create visual tags. Look for logos, brand marks, copyrighted characters, celebrity likenesses, copied signatures, protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Use Simplified Chinese for reasons, detected_references, and recommendation. Assign level low, medium, high, or unknown. Context: {asset['topic_zh']} / {asset['topic_en']}. Schema: {{\"ip_risk\":{{\"level\":\"low\",\"reasons\":[],\"detected_references\":[],\"recommendation\":\"\"}}}}",
+            self.get_config()["gemini_verification_model"], attempts=2,
+            reference_image=self._pattern_analysis_image(asset["path"]),
+        )
+        payload = extract_json_object(response)
+        risk = payload.get("ip_risk") if isinstance(payload.get("ip_risk"), dict) else {}
+        level = str(risk.get("level") or "unknown").lower()
+        if level not in {"low", "medium", "high", "unknown"}:
+            level = "unknown"
+        reasons = string_list(risk.get("reasons"), limit=8, item_limit=240)
+        recommendation = str(risk.get("recommendation") or "")[:500]
+        if recommendation:
+            reasons.append(recommendation)
+        matches = string_list(risk.get("detected_references"), limit=8, item_limit=160)
+        with self._connect() as db:
+            db.execute("""UPDATE pattern_assets SET ip_status=?,ip_reasons=?,ip_matches=?,ip_error='',ip_checked_at=? WHERE id=?""",
+                       (level, json_text(reasons), json_text(matches), utc_now(), asset_id))
+
+    def _get_pattern_asset_context(self, asset_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT a.*,t.topic_zh,t.topic_en FROM pattern_assets a JOIN trends t ON t.id=a.trend_id WHERE a.id=?""",
+                (asset_id,),
+            ).fetchone()
+        if not row or not row["image_path"]:
+            raise ValueError("图案资产不存在或没有图片")
+        path = (self.assets_dir / row["image_path"]).resolve()
+        if path.parent == self.assets_dir.resolve() or not path.is_relative_to(self.assets_dir.resolve()) or not path.exists():
+            raise ValueError("图案文件不存在或路径不安全")
+        return {**dict(row), "path": path}
 
     async def _analyze_pattern_asset(self, asset_id: str) -> None:
         with self._connect() as db:

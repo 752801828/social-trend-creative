@@ -166,13 +166,17 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "screened_assets": 0,
         "pending_assets": 0,
     }
-    config, connections, dashboard, runs, tagging, pattern_analysis, source_state = await asyncio.gather(
+    pattern_tags_fallback = {**service.pattern_tagging_backfill, "tagged_assets": 0, "pending_assets": 0}
+    pattern_ip_fallback = {**service.pattern_ip_backfill, "screened_assets": 0, "pending_assets": 0}
+    config, connections, dashboard, runs, tagging, pattern_analysis, pattern_tags, pattern_ip, source_state = await asyncio.gather(
         safe(service.get_config, {}),
         safe(service.connection_info, {}),
         safe(service.dashboard, dashboard_fallback),
         safe(lambda: service.list_runs(limit), []),
         safe(service.tagging_state, tagging_fallback),
         safe(service.pattern_analysis_state, pattern_analysis_fallback),
+        safe(lambda: {**service.pattern_tagging_backfill}, pattern_tags_fallback),
+        safe(lambda: {**service.pattern_ip_backfill}, pattern_ip_fallback),
         safe(
             service.source_state,
             {"syncing": False, "sync": {}, "sources": [], "total_entries": 0, "recent_entries": 0},
@@ -186,6 +190,8 @@ async def state(limit: int = Query(default=40, ge=1, le=200)):
         "runs": runs,
         "tagging": tagging,
         "pattern_analysis": pattern_analysis,
+        "pattern_tags": pattern_tags,
+        "pattern_ip": pattern_ip,
         "source_state": source_state,
         "update": read_update_status(),
     }
@@ -370,6 +376,30 @@ async def backfill_pattern_analysis(force: bool = Query(default=False)):
     return {"status": "accepted"}
 
 
+@app.post("/api/patterns/tags/backfill", status_code=202)
+async def backfill_pattern_tags():
+    try:
+        launched = service.launch_pattern_part_backfill("tags")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
+    return {"status": "accepted", "part": "tags"}
+
+
+@app.post("/api/patterns/ip/backfill", status_code=202)
+async def backfill_pattern_ip():
+    try:
+        launched = service.launch_pattern_part_backfill("ip")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
+    return {"status": "accepted", "part": "ip"}
+
+
 @app.post("/api/patterns/{asset_id}/analyze", status_code=202)
 async def analyze_pattern(asset_id: str):
     try:
@@ -380,6 +410,30 @@ async def analyze_pattern(asset_id: str):
         raise HTTPException(status_code=409, detail="已有任务正在执行")
     invalidate_state_cache()
     return {"asset_id": asset_id, "status": "accepted"}
+
+
+@app.post("/api/patterns/{asset_id}/tag", status_code=202)
+async def tag_pattern(asset_id: str):
+    try:
+        launched = service.launch_pattern_part(asset_id, "tags")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
+    return {"asset_id": asset_id, "status": "accepted", "part": "tags"}
+
+
+@app.post("/api/patterns/{asset_id}/ip", status_code=202)
+async def screen_pattern_ip(asset_id: str):
+    try:
+        launched = service.launch_pattern_part(asset_id, "ip")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
+    return {"asset_id": asset_id, "status": "accepted", "part": "ip"}
 
 
 @app.post("/api/patterns/{asset_id}/regenerate", status_code=202)
