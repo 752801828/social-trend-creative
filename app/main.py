@@ -94,6 +94,11 @@ class PoolRequest(BaseModel):
     count: int | None = Field(default=None, ge=1, le=30)
 
 
+class PatternRegenerateRequest(BaseModel):
+    tag_key: str = Field(min_length=1, max_length=40)
+    tag_value: str = Field(min_length=1, max_length=160)
+
+
 @app.get("/")
 async def index():
     return FileResponse(ROOT / "static" / "index.html")
@@ -225,10 +230,11 @@ def pool_cards(
     q: str = Query(default="", max_length=200),
     category: str = Query(default="", max_length=100),
     transparent: str = Query(default="", max_length=3),
+    tag: str = Query(default="", max_length=200),
 ):
     try:
         return service.list_pool_cards(
-            pool, limit, offset, q=q, category=category, transparent=transparent,
+            pool, limit, offset, q=q, category=category, transparent=transparent, tag=tag,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -368,6 +374,20 @@ async def backfill_pattern_analysis(force: bool = Query(default=False)):
 async def analyze_pattern(asset_id: str):
     try:
         launched = service.launch_pattern_analysis(asset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not launched:
+        raise HTTPException(status_code=409, detail="已有任务正在执行")
+    invalidate_state_cache()
+    return {"asset_id": asset_id, "status": "accepted"}
+
+
+@app.post("/api/patterns/{asset_id}/regenerate", status_code=202)
+async def regenerate_pattern(asset_id: str, request: PatternRegenerateRequest):
+    try:
+        launched = service.launch_pattern_regeneration(
+            asset_id, request.tag_key.strip(), request.tag_value.strip()
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not launched:

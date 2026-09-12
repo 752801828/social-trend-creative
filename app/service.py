@@ -1323,6 +1323,49 @@ Schema:
             f"patterns-{run_id}",
         )
 
+    def launch_pattern_regeneration(self, asset_id: str, tag_key: str, tag_value: str) -> bool:
+        """Regenerate one artwork with a user-supplied visual tag replacement."""
+        if self.active_task and not self.active_task.done():
+            return False
+        tag_key = tag_key.strip()
+        tag_value = tag_value.strip()
+        if tag_key not in CREATIVE_TAG_KEYS:
+            raise ValueError(f"不支持的图案标签类别：{tag_key}")
+        if not tag_value:
+            raise ValueError("自定义标签不能为空")
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT a.id,a.run_id,a.trend_id,a.prompt_id,a.sequence,a.status,
+                          t.topic_en,t.topic_zh,t.summary_zh,t.why_trending,t.visual_brief_en
+                   FROM pattern_assets a JOIN trends t ON t.id=a.trend_id WHERE a.id=?""",
+                (asset_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError("图案资产不存在")
+        if row["status"] != "success":
+            raise ValueError("只有已生成成功的图案才能替换标签重生成")
+        return self._launch(
+            row["run_id"],
+            self._regenerate_pattern_asset(dict(row), tag_key, tag_value),
+            f"pattern-regenerate-{asset_id}",
+        )
+
+    async def _regenerate_pattern_asset(self, asset: dict[str, Any], tag_key: str, tag_value: str) -> None:
+        async with self.operation_lock:
+            trend = dict(asset)
+            override = f"\nCUSTOM VISUAL TAG REPLACEMENT: replace the {tag_key} attribute with exactly this user-defined direction: {tag_value}. Keep all other visual attributes and the event anchor coherent."
+            prompt = self._isolated_pattern_prompt(self._pattern_flow_prompt(trend) + override)
+            config = self.get_config()
+            with self._connect() as db:
+                sequence = int(db.execute(
+                    "SELECT COALESCE(MAX(sequence),0)+1 FROM pattern_assets WHERE trend_id=?",
+                    (asset["trend_id"],),
+                ).fetchone()[0])
+            await self._generate_pattern_one(
+                asset["run_id"], trend, sequence, config,
+                prompt_id=asset["prompt_id"], prompt_text=prompt,
+            )
+
     def launch_product_generation(self, run_id: str, count: int | None = None) -> bool:
         with self._connect() as db:
             exists = db.execute(
@@ -2970,14 +3013,16 @@ Requirements:
         q: str = "",
         category: str = "",
         transparent: str = "",
+        tag: str = "",
     ) -> dict[str, Any]:
         limit = min(100, max(1, limit))
         offset = max(0, offset)
         q = q.strip()[:200]
         category = category.strip()[:100]
+        tag = tag.strip()[:200]
         if pool == "sellability":
             raise ValueError("销售评分功能已移除")
-        if pool == "prompts" and not any((q, category, transparent)):
+        if pool == "prompts" and not any((q, category, transparent, tag)):
             return self._list_pool_cards_legacy(pool, limit, offset)
 
         if pool == "acquire":
@@ -3028,6 +3073,16 @@ Requirements:
         if pool == "patterns" and transparent in {"yes", "no"}:
             where.append("a.has_transparency=?")
             params.append(1 if transparent == "yes" else 0)
+        if pool == "patterns" and tag:
+            # Tags are persisted as normalized JSON; matching both key and value
+            # keeps free-form user filters useful without requiring SQLite JSON1.
+            if ":" in tag:
+                tag_key, tag_value = (part.strip() for part in tag.split(":", 1))
+                where.append("a.visual_tags LIKE ? AND a.visual_tags LIKE ?")
+                params.extend([f'%"{tag_key}"%', f"%{tag_value}%"])
+            else:
+                where.append("a.visual_tags LIKE ?")
+                params.append(f"%{tag}%")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
         order_sql = f"{created_column} DESC"
         if pool == "trends":
