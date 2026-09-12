@@ -1361,10 +1361,12 @@ Schema:
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM pattern_assets WHERE trend_id=?",
                     (asset["trend_id"],),
                 ).fetchone()[0])
-            await self._generate_pattern_one(
+            new_asset_id = await self._generate_pattern_one(
                 asset["run_id"], trend, sequence, config,
                 prompt_id=asset["prompt_id"], prompt_text=prompt,
             )
+            if new_asset_id:
+                await self._analyze_pattern_asset(new_asset_id)
 
     def launch_product_generation(self, run_id: str, count: int | None = None) -> bool:
         with self._connect() as db:
