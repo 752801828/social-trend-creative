@@ -96,6 +96,11 @@ CREATIVE_TAG_KEYS = (
     "subject", "action", "setting", "style", "palette", "composition",
     "mood", "texture", "typography", "audience", "risk_controls",
 )
+CREATIVE_TAG_LABELS = {
+    "subject": "主体", "action": "动作", "setting": "场景", "style": "画风",
+    "palette": "配色", "composition": "构图", "mood": "情绪", "texture": "材质",
+    "typography": "文字", "audience": "受众", "risk_controls": "风险控制",
+}
 
 _TAG_CANONICAL = {
     "cat": "猫", "cats": "猫", "feline": "猫", "dog": "狗", "dogs": "狗", "canine": "狗",
@@ -3223,15 +3228,18 @@ Requirements:
             where.append("a.has_transparency=?")
             params.append(1 if transparent == "yes" else 0)
         if pool == "patterns" and tag:
-            # Tags are persisted as normalized JSON; matching both key and value
-            # keeps free-form user filters useful without requiring SQLite JSON1.
-            if ":" in tag:
-                tag_key, tag_value = (part.strip() for part in tag.split(":", 1))
-                where.append("a.visual_tags LIKE ? AND a.visual_tags LIKE ?")
-                params.extend([f'%"{tag_key}"%', f"%{tag_value}%"])
-            else:
-                where.append("a.visual_tags LIKE ?")
-                params.append(f"%{tag}%")
+            # Comma-separated values are AND filters. Each value may be key:value
+            # (for example 主体:猫) or a free-form text match.
+            for selected_tag in (part.strip() for part in tag.split(",")):
+                if not selected_tag:
+                    continue
+                if ":" in selected_tag:
+                    tag_key, tag_value = (part.strip() for part in selected_tag.split(":", 1))
+                    where.append("a.visual_tags LIKE ? AND a.visual_tags LIKE ?")
+                    params.extend([f'%"{tag_key}"%', f"%{tag_value}%"])
+                else:
+                    where.append("a.visual_tags LIKE ?")
+                    params.append(f"%{selected_tag}%")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
         order_sql = f"{created_column} DESC"
         if pool == "trends":
@@ -3261,7 +3269,23 @@ Requirements:
                     item[key] = json.loads(item.get(key) or "[]")
                 item["image_url"] = f"/assets/{item['image_path']}"
                 entries.append({"item": item, "trend": {"id": item["trend_id"], "topic_zh": topic_zh, "category": item_category}, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
-        return {"entries": entries, "total": total}
+        result = {"entries": entries, "total": total}
+        if pool == "patterns":
+            options: dict[str, str] = {}
+            with self._connect() as db:
+                tag_rows = db.execute(
+                    "SELECT visual_tags FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL"
+                ).fetchall()
+            for tag_row in tag_rows:
+                for key, values in normalise_creative_tags(tag_row["visual_tags"]).items():
+                    for value in values:
+                        option_value = f"{key}:{value}"
+                        options[option_value] = f"{CREATIVE_TAG_LABELS.get(key, key)}：{value}"
+            result["tag_options"] = [
+                {"value": value, "label": options[value]}
+                for value in sorted(options, key=lambda item: options[item])
+            ]
+        return result
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:

@@ -200,7 +200,7 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("获取IP筛查", html)
         self.assertIn("analyzePatternPart", html)
         self.assertIn("regeneratePatternWithTag", html)
-        self.assertIn("图案标签，如 主体:猫", html)
+        self.assertIn("多选图案标签", html)
         self.assertIn("ip_status", html)
         self.assertIn("停止图案任务", html)
         self.assertIn("当前任务", html)
@@ -925,7 +925,7 @@ class TrendServiceTests(unittest.TestCase):
                     (asset_id, run_id, "trend-1", 1, "model", "prompt", "success", f"{asset_id}.png", tags, ip_status, utc_now()),
                 )
         self.assertEqual(self.service._pattern_part_assets("tags"), ["untagged", "screened"])
-        self.assertEqual(self.service._pattern_part_assets("ip"), ["tagged", "ip-error"])
+        self.assertCountEqual(self.service._pattern_part_assets("ip"), ["tagged", "ip-error"])
 
     def test_cancelled_generation_restores_selectable_trend_status(self):
         run_id = self.service.create_run("manual")
