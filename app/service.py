@@ -12,8 +12,10 @@ import os
 import random
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
+import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -259,6 +261,9 @@ class TrendService:
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         self.flow_base_url = os.getenv("FLOW_BASE_URL", "http://127.0.0.1:38000").rstrip("/")
         self.flow_api_key = os.getenv("FLOW_API_KEY", "")
+        self.pattern_generation_backend = os.getenv("PATTERN_GENERATION_BACKEND", "flow").strip().lower() or "flow"
+        self.layerdiffuse_command = os.getenv("LAYERDIFFUSE_COMMAND", "").strip()
+        self.layerdiffuse_workdir = os.getenv("LAYERDIFFUSE_WORKDIR", "").strip() or None
         trendradar_url = os.getenv("TRENDRADAR_MCP_URL", "").strip()
         self.trendradar_mcp_url = (
             trendradar_url if trendradar_url.endswith("/mcp") else f"{trendradar_url.rstrip('/')}/mcp"
@@ -643,6 +648,8 @@ class TrendService:
             "gemini_key_configured": bool(self.gemini_api_key),
             "flow_base_url": self.flow_base_url,
             "flow_key_configured": bool(self.flow_api_key),
+            "pattern_generation_backend": self.pattern_generation_backend,
+            "layerdiffuse_configured": bool(self.layerdiffuse_command),
             "feishu_configured": bool(self.feishu_webhook),
             "public_base_url": self.public_base_url,
             "trendradar_mcp_url": self.trendradar_mcp_url,
@@ -2650,7 +2657,7 @@ Schema:
         ]
         return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Tag values must be concise Simplified Chinese, merge synonyms, and use at most 3 values per key. Use only these keys: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork exported as a transparent-background PNG. It must contain only the printable design pixels. Keep generous transparent negative space around and between design elements. If the image model cannot emit alpha transparency, use exactly one flat, matte solid-color background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. The fallback background must have no gradient, texture, checkerboard, illustration, scenery, shadow, glow, border, frame, or photographic environment so it can be removed cleanly. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
+For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Tag values must be concise Simplified Chinese, merge synonyms, and use at most 3 values per key. Use only these keys: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork generated on exactly one flat, matte solid-color background so a later segmentation pass can remove it reliably. Choose a background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. The background must have no gradient, texture, checkerboard, illustration, scenery, shadow, glow, border, frame, or photographic environment. Do not request an alpha channel from the image model. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
 
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
@@ -2800,22 +2807,22 @@ Verified context: {trend['summary_zh']}
 Why it is trending: {trend['why_trending']}
 Visual direction: {trend['visual_brief_en']}
 
-Preserve the recognizable generic subjects and defining action or interaction. Choose the most suitable format: original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. Icons and abstraction may simplify the event but must remain meaningfully connected to it. Use no logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Output only the printable design pixels as a transparent-background PNG with generous transparent negative space. Do not show or fill the canvas with a sky, ground, wall, room, floor, horizon, landscape, photographic environment, poster rectangle, border, frame, product, mockup, hands, clothing, packaging, cast shadow, or merchandising scene. If alpha transparency is technically impossible, use exactly one flat, matte solid-color background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. Never use a gradient, texture, checkerboard, illustration, scenery, glow, border, frame, or photographic background. A comic may contain small story cues inside its isolated silhouette or vignette, but never a rectangular background scene."""
+Preserve the recognizable generic subjects and defining action or interaction. Choose the most suitable format: original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. Icons and abstraction may simplify the event but must remain meaningfully connected to it. Use no logos, trademarks, copyrighted characters, public-figure likenesses, copied posts, watermarks, or existing artwork. Generate the artwork on exactly one flat, matte solid-color background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. Do not use alpha transparency, gradients, textures, checkerboards, illustrations, scenery, glow, borders, frames, photographic backgrounds, poster rectangles, products, mockups, hands, clothing, packaging, cast shadows, or merchandising scenes. A comic may contain small story cues inside its isolated silhouette or vignette, but never a rectangular background scene."""
 
     @staticmethod
     def _isolated_pattern_prompt(pattern_prompt: str) -> str:
         return f"""MANDATORY OUTPUT FORMAT — this overrides any conflicting wording below:
-- Return one flat, print-ready design asset as a transparent-background PNG.
-- Render only the artwork pixels. Every area outside the artwork must be transparent.
+- Return one flat, print-ready design asset centered on exactly one matte solid-color background.
+- Render only the artwork plus that removable background; keep the background uniform and clearly different in brightness from the dominant artwork.
 - No full-canvas scene or background; no sky, ground, wall, room, floor, horizon, landscape, photograph, backdrop, gradient, texture, poster rectangle, border, frame, product, mockup, hands, packaging, or cast shadow.
 - Keep generous transparent negative space around the complete design and transparent gaps between separate icons.
 - Story details may appear only as compact internal elements contained inside the design silhouette or vignette, never as a rectangular illustrated scene.
-- If alpha transparency is technically impossible, use exactly one flat, matte solid-color background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray). Never use a similar-value color or simulate transparency with a checkerboard.
+- Use exactly one flat, matte solid-color background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray). Never use a similar-value color or simulate transparency with a checkerboard.
 
 ARTWORK BRIEF:
 {pattern_prompt}
 
-Final check before output: isolated artwork only, transparent outside pixels when supported; otherwise one high-contrast flat solid background, no scene and no product."""
+Final check before output: isolated artwork on one high-contrast flat solid background, no scene and no product."""
 
     @staticmethod
     def _product_reference_prompt(product_prompt: str, preferred_product: str | None = None) -> str:
