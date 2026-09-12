@@ -114,6 +114,10 @@ class TrendServiceTests(unittest.TestCase):
             columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_pool)")}
         self.assertIn("creative_tags", columns)
 
+    def test_visual_tags_collapse_to_broad_reusable_terms(self):
+        tags = normalise_creative_tags({"subject": ["10号球员", "7号球员", "医生", "护士", "猫头鹰"]})
+        self.assertEqual(tags["subject"], ["球员", "医护人员", "猫头鹰"])
+
     def test_tagging_runs_separately_without_rewriting_prompts(self):
         run_id = self.service.create_run("manual")
         trend = self._candidate("candidate-1", "Cat trend", "", None)
@@ -200,7 +204,8 @@ class TrendServiceTests(unittest.TestCase):
         self.assertIn("获取IP筛查", html)
         self.assertIn("analyzePatternPart", html)
         self.assertIn("regeneratePatternWithTag", html)
-        self.assertIn("多选图案标签", html)
+        self.assertIn("class=\"tag-filter\"", html)
+        self.assertIn("（${Number(option.count||0)}）", html)
         self.assertIn("ip_status", html)
         self.assertIn("停止图案任务", html)
         self.assertIn("当前任务", html)

@@ -96,12 +96,6 @@ CREATIVE_TAG_KEYS = (
     "subject", "action", "setting", "style", "palette", "composition",
     "mood", "texture", "typography", "audience", "risk_controls",
 )
-CREATIVE_TAG_LABELS = {
-    "subject": "主体", "action": "动作", "setting": "场景", "style": "画风",
-    "palette": "配色", "composition": "构图", "mood": "情绪", "texture": "材质",
-    "typography": "文字", "audience": "受众", "risk_controls": "风险控制",
-}
-
 _TAG_CANONICAL = {
     "cat": "猫", "cats": "猫", "feline": "猫", "dog": "狗", "dogs": "狗", "canine": "狗",
     "person": "人物", "people": "人物", "human": "人物", "humans": "人物", "athlete": "运动员", "athletes": "运动员",
@@ -117,6 +111,58 @@ _TAG_CANONICAL = {
     "fans": "爱好者", "sports fans": "运动爱好者", "general audience": "大众人群",
     "political": "政治主题", "silhouette": "剪影人物", "abstract": "抽象", "geometric": "几何", "pattern": "图案", "nature": "自然", "technology": "科技", "travel": "旅行", "food": "食物", "seasonal": "季节主题",
 }
+
+_BROAD_CHINESE_TAGS = {
+    "subject": (
+        (("球员", "运动员", "队员", "选手", "前锋", "后卫", "守门员"), "球员"),
+        (("医护", "医生", "护士", "医务", "护理人员"), "医护人员"),
+        (("警察", "警员", "警方", "民警"), "警务人员"),
+        (("消防", "救火员"), "消防员"),
+        (("观众", "粉丝", "球迷", "支持者"), "观众"),
+        (("男孩", "女孩", "儿童", "孩子", "小朋友"), "儿童"),
+        (("男人", "女人", "男性", "女性", "人物", "人群", "行人"), "人物"),
+    ),
+    "action": (
+        (("奔跑", "跑步", "冲刺"), "奔跑"), (("跳跃", "起跳"), "跳跃"),
+        (("庆祝", "欢呼"), "庆祝"), (("对抗", "争抢", "搏斗"), "对抗"),
+        (("救治", "治疗", "诊疗", "护理"), "救治"),
+    ),
+    "setting": (
+        (("医院", "诊所", "病房", "医疗场景"), "医疗场所"),
+        (("球场", "赛场", "体育场", "运动场"), "运动场"),
+        (("街道", "街头", "道路"), "街道"),
+    ),
+    "style": (
+        (("编辑插画", "新闻插画", "社论插画"), "编辑插画"),
+        (("扁平插画", "扁平风", "平面插画"), "扁平插画"),
+        (("漫画", "卡通", "动漫"), "卡通插画"),
+        (("写实", "现实主义", "照片级"), "写实"),
+        (("复古", "怀旧"), "复古"), (("极简", "简约"), "极简"),
+    ),
+    "composition": (
+        (("居中", "中心构图", "中央构图"), "居中构图"),
+        (("对称", "左右对称"), "对称构图"), (("对角", "斜线"), "对角构图"),
+        (("近景", "特写"), "近景"),
+    ),
+    "risk_controls": (
+        (("品牌", "商标", "标志", "logo", "Logo"), "无品牌标识"),
+        (("版权角色", "知名角色", "影视角色", "动漫角色"), "无版权角色"),
+        (("名人", "公众人物", "真人肖像"), "无真人肖像"),
+        (("原创", "通用", "虚构"), "原创化"),
+    ),
+}
+
+
+def _broad_chinese_tag(key: str, value: str) -> str:
+    text = re.sub(r"[（(][^）)]*[）)]", "", value).strip()
+    text = re.sub(r"(?:第)?[0-9零一二三四五六七八九十百]+号", "", text)
+    text = re.sub(r"^(?:一名|一位|两名|多名|年轻的?|年迈的?|男性|女性)", "", text).strip()
+    for needles, canonical in _BROAD_CHINESE_TAGS.get(key, ()):
+        if any(needle in text for needle in needles):
+            return canonical
+    # Long descriptive phrases are not reusable filter labels. New model output is
+    # explicitly asked for broad nouns, while short open-ended values remain valid.
+    return text if 1 <= len(text) <= 8 else ""
 
 
 @lru_cache(maxsize=2)
@@ -161,7 +207,7 @@ def normalise_creative_tags(value: Any) -> dict[str, list[str]]:
             if not text:
                 continue
             if any("\u4e00" <= char <= "\u9fff" for char in text):
-                label = "" if text.startswith("其他") else str(item).strip()
+                label = "" if text.startswith("其他") else _broad_chinese_tag(key, str(item).strip())
             else:
                 label = _TAG_CANONICAL.get(text)
                 if label is None:
@@ -1251,7 +1297,7 @@ class TrendService:
 
     @staticmethod
     def _pattern_analysis_prompt(asset: dict[str, Any]) -> str:
-        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. All tag values, risk reasons, detected references, and recommendations MUST be concise Simplified Chinese. Use arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Leave a key empty when not visually supported.
+        return f"""Inspect the attached generated standalone printable artwork. Return strict JSON only. First create visual_tags that describe the pixels actually visible, not the original prompt. All tag values, risk reasons, detected references, and recommendations MUST be concise Simplified Chinese. Use arrays for: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Leave a key empty when not visually supported. Tags must be broad, reusable category words rather than descriptions: output 球员 instead of 10号球员/7号球员, 医护人员 instead of 医生/护士, and merge synonyms within each key. Never include counts, jersey numbers, proper names, colors or actions inside subject, or multiple near-synonyms. Prefer one broad value per key and no more than two.
 
 Then perform an IP risk screen. This is not legal advice and must not claim legal clearance. Look for visible logos, brand marks, copyrighted characters, celebrity/public-figure likenesses, copied artwork signatures, readable protected names, sports team identities, or near-identical franchise imagery. Do not invent matches. Assign level low, medium, high, or unknown. Return reasons, detected_references, and a concise recommendation in Simplified Chinese.
 
@@ -1272,7 +1318,7 @@ Schema:
     async def _analyze_pattern_tags_asset(self, asset_id: str) -> None:
         asset = self._get_pattern_asset_context(asset_id)
         response = await self._call_gemini(
-            f"Inspect this generated artwork and return strict JSON only. Describe only visible pixels using concise Simplified Chinese arrays for these keys: {', '.join(CREATIVE_TAG_KEYS)}. Do not assess copyright or provide risk analysis. Context: {asset['topic_zh']} / {asset['topic_en']}. Schema: {{\"visual_tags\":{{\"subject\":[],\"action\":[],\"setting\":[],\"style\":[],\"palette\":[],\"composition\":[],\"mood\":[],\"texture\":[],\"typography\":[],\"audience\":[],\"risk_controls\":[]}}}}",
+            f"Inspect this generated artwork and return strict JSON only. Describe only visible pixels using concise Simplified Chinese arrays for these keys: {', '.join(CREATIVE_TAG_KEYS)}. Use only broad reusable category words, not descriptive phrases: return 球员 for 10号球员/7号球员 and 医护人员 for 医生/护士. Merge synonyms, never include counts, jersey numbers, proper names, colors or actions inside subject, and prefer one value per key with at most two. Do not assess copyright or provide risk analysis. Context: {asset['topic_zh']} / {asset['topic_en']}. Schema: {{\"visual_tags\":{{\"subject\":[],\"action\":[],\"setting\":[],\"style\":[],\"palette\":[],\"composition\":[],\"mood\":[],\"texture\":[],\"typography\":[],\"audience\":[],\"risk_controls\":[]}}}}",
             self.get_config()["gemini_verification_model"], attempts=2,
             reference_image=self._pattern_analysis_image(asset["path"]),
         )
@@ -2802,7 +2848,7 @@ Schema:
         ]
         return f"""You create two production-ready image prompts for every supplied pattern-pool entry extracted from worldwide social trends.
 
-For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Tag values must be concise Simplified Chinese, merge synonyms, and use at most 3 values per key. Use only these keys: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork generated on exactly one flat, matte solid-color background so a later segmentation pass can remove it reliably. Choose a background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. The background must have no gradient, texture, checkerboard, illustration, scenery, shadow, glow, border, frame, or photographic environment. Do not request an alpha channel from the image model. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
+For every input trend_id, write a structured creative_tags object, a pattern_prompt, and a product_prompt. The tags are reusable design variables for later comparison and controlled variants. Tag values must be broad Simplified Chinese category words, merge synonyms, and use at most 2 values per key. Use 球员 rather than 10号球员/7号球员, and 医护人员 rather than 医生/护士. Never put counts, jersey numbers, proper names, colors, actions, or descriptive phrases inside subject. Use only these keys: subject, action, setting, style, palette, composition, mood, texture, typography, audience, risk_controls. Do not output product. Keep subject and action concrete enough to preserve the news connection; values inside subject remain open-ended and are not limited to a fixed catalog. Then write the pattern_prompt and product_prompt as follows. The pattern_prompt must be a detailed English prompt for one standalone, print-ready artwork generated on exactly one flat, matte solid-color background so a later segmentation pass can remove it reliably. Choose a background with strong luminance contrast against the dominant artwork (prefer pure white, black, or neutral gray); choose a clearly different brightness, never a similar-value color. The background must have no gradient, texture, checkerboard, illustration, scenery, shadow, glow, border, frame, or photographic environment. Do not request an alpha channel from the image model. Choose the best event-linked format: a recognizable original comic or editorial illustration, icon set, emblem, badge, symbolic graphic, isolated repeating-motif cluster, geometric motif, or decorative pattern. A comic may include only small internal story cues contained within the design silhouette or vignette; it must not become a rectangular scene. Icons and abstraction are welcome when they still communicate the event; concrete subjects and defining action remain the default for narrative news.
 
 The product_prompt must be roughly 140–240 English words and instruct the image model to use the attached generated pattern image as the exact artwork reference for one realistic print-on-demand product rendering. Preserve the reference artwork's subjects, action, composition, palette, and style rather than redesigning it. Select one suitable physical item and fully specify placement, scale, print treatment, product color, material, camera angle, lighting, and neutral surroundings. The final image must show that supplied artwork printed directly on the product, never as separate flat artwork.
 
@@ -3271,19 +3317,22 @@ Requirements:
                 entries.append({"item": item, "trend": {"id": item["trend_id"], "topic_zh": topic_zh, "category": item_category}, "run": {"id": item["run_id"], "started_at": run_started_at}, "date": item["created_at"]})
         result = {"entries": entries, "total": total}
         if pool == "patterns":
-            options: dict[str, str] = {}
+            options: dict[str, int] = {}
             with self._connect() as db:
                 tag_rows = db.execute(
                     "SELECT visual_tags FROM pattern_assets WHERE status='success' AND image_path IS NOT NULL"
                 ).fetchall()
             for tag_row in tag_rows:
-                for key, values in normalise_creative_tags(tag_row["visual_tags"]).items():
-                    for value in values:
-                        option_value = f"{key}:{value}"
-                        options[option_value] = f"{CREATIVE_TAG_LABELS.get(key, key)}：{value}"
+                values = {
+                    value
+                    for tag_values in normalise_creative_tags(tag_row["visual_tags"]).values()
+                    for value in tag_values
+                }
+                for value in values:
+                    options[value] = options.get(value, 0) + 1
             result["tag_options"] = [
-                {"value": value, "label": options[value]}
-                for value in sorted(options, key=lambda item: options[item])
+                {"value": value, "label": value, "count": options[value]}
+                for value in sorted(options, key=lambda item: (-options[item], item))
             ]
         return result
 
